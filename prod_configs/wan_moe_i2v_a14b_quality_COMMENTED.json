@@ -1,0 +1,290 @@
+{
+    // ═══════════════════════════════════════════════════════════════
+    // BASIC MODEL CONFIGURATION
+    // ═══════════════════════════════════════════════════════════════
+    
+    // Human-readable name for this configuration preset
+    "preset": "Quality focused",
+    
+    // Model class identifier: "wan2.2_moe_distill" = Wan 2.2 Mixture-of-Experts distilled model
+    // This model has been distilled to run faster with fewer inference steps
+    "model_cls": "wan2.2_moe_distill",
+    
+    // Task type: "i2v" = Image-to-Video generation (converts static image to video)
+    "task": "i2v",
+    
+    // Root directory containing all model files
+    "model_path": "models/wan2.2_models/official_distill_repo",
+    
+    // Self-forcing model path (optional enhancement technique) - null means not used
+    "sf_model_path": null,
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // MODEL CHECKPOINTS - Two-Stage Distillation
+    // ═══════════════════════════════════════════════════════════════
+    
+    // High noise model: Handles early denoising steps (1000→750)
+    // Better at establishing overall structure and composition
+    "high_noise_original_ckpt": "models/wan2.2_models/official_distill_repo/distill_models/high_noise_model/distill_model.safetensors",
+    
+    // Low noise model: Handles late denoising steps (500→250)
+    // Better at refining details and removing remaining noise
+    "low_noise_original_ckpt": "models/wan2.2_models/official_distill_repo/distill_models/low_noise_model/distill_model.safetensors",
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // ENCODER MODEL PATHS
+    // ═══════════════════════════════════════════════════════════════
+    
+    // VAE (Variational Autoencoder): Compresses video frames into latent space
+    // Reduces memory usage and enables faster processing
+    "vae_path": "models/wan2.2_models/vae/Wan2.1_VAE.pth",
+    
+    // T5 text encoder: Converts text prompts into embeddings
+    // UMT5-XXL model provides multilingual support with high quality
+    "t5_original_ckpt": "models/wan2.2_models/encoders/models_t5_umt5-xxl-enc-bf16.safetensors",
+    
+    // CLIP text encoder: Alternative text encoder for cross-attention
+    // XLM-RoBERTa provides robust multilingual text understanding
+    "clip_original_ckpt": "models/wan2.2_models/encoders/models_clip_open-clip-xlm-roberta-large-vit-huge-14.safetensors",
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // DIFFUSERS METADATA
+    // ═══════════════════════════════════════════════════════════════
+    
+    "_class_name": "WanModel",
+    "_diffusers_version": "0.33.0",
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // TRANSFORMER ARCHITECTURE DIMENSIONS
+    // ═══════════════════════════════════════════════════════════════
+    
+    // Model hidden dimension: Core feature dimension throughout transformer
+    "dim": 5120,
+    
+    // Epsilon for numerical stability in normalization layers
+    "eps": 1e-06,
+    
+    // Feed-forward network dimension: Intermediate expansion in MLP layers
+    // Typically 2.7x the hidden dimension for optimal performance
+    "ffn_dim": 13824,
+    
+    // Frequency embedding dimension for positional encoding
+    "freq_dim": 256,
+    
+    // Input channel dimension: 36 channels after VAE encoding
+    // (latent space representation of video frames)
+    "in_dim": 36,
+    
+    // Model type confirmation for i2v task
+    "model_type": "i2v",
+    
+    // Number of attention heads: Enables multi-head attention mechanism
+    "num_heads": 40,
+    
+    // Number of transformer layers: Depth of the model
+    "num_layers": 40,
+    
+    // Output channel dimension: 16 channels for VAE decoding
+    "out_dim": 16,
+    
+    // Maximum text sequence length for text encoder outputs
+    "text_len": 512,
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // MEMORY & COMPUTE OPTIMIZATION
+    // ═══════════════════════════════════════════════════════════════
+    
+    // Memory-mapped calibration for quantization (not used here)
+    "do_mm_calib": false,
+    
+    // CPU offloading: Moves model layers to CPU when not in use
+    // Reduces GPU memory at cost of some speed
+    "cpu_offload": true,
+    
+    // Maximum area mode: Automatically adjusts resolution to max supported
+    "max_area": false,
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // VAE ENCODING PARAMETERS
+    // ═══════════════════════════════════════════════════════════════
+    
+    // VAE downsampling stride: [temporal, height, width]
+    // [4, 8, 8] means: 4x compression in time, 8x in spatial dimensions
+    "vae_stride": [4, 8, 8],
+    
+    // Patch size for tokenization: [temporal, height, width]
+    // [1, 2, 2] means 1 frame, 2x2 spatial patches
+    "patch_size": [1, 2, 2],
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // FEATURE CACHING & ACCELERATION
+    // ═══════════════════════════════════════════════════════════════
+    
+    // Retention steps for TeaCache (referenced in transformer_infer.py line 538)
+    // false = don't use retention-based caching (uses simpler 1-step caching)
+    // true = uses 5-step retention for better quality but slower
+    "use_ret_steps": false,
+    
+    // Data type: bfloat16 reduces memory and improves speed with minimal quality loss
+    "use_bfloat16": true,
+    
+    // Prompt enhancer: Automatic prompt improvement (disabled for direct control)
+    "use_prompt_enhancer": false,
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // PARALLELIZATION SETTINGS
+    // ═══════════════════════════════════════════════════════════════
+    
+    // General parallelization across multiple GPUs
+    "parallel": false,
+    
+    // Sequence parallelization: Splits long sequences across GPUs
+    "seq_parallel": false,
+    
+    // CFG parallelization: Runs conditional/unconditional in parallel
+    "cfg_parallel": false,
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // INPUT CONDITIONING
+    // ═══════════════════════════════════════════════════════════════
+    
+    // Use separate image encoder for input image (false = uses VAE only)
+    "use_image_encoder": false,
+    
+    // Number of frames to use for attention map computation
+    // 61 frames = full video length for memory-efficient attention
+    "attnmap_frame_num": 61,
+    
+    // Boundary threshold (legacy parameter, typically 0.5)
+    "boundary": 0.5,
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // OUTPUT VIDEO SPECIFICATIONS
+    // ═══════════════════════════════════════════════════════════════
+    
+    // Total number of frames to generate (61 frames ≈ 3.8 seconds at 16fps)
+    "target_video_length": 61,
+    
+    // Output video height in pixels (384 = reduced from 720 for faster generation)
+    "target_height": 384,
+    
+    // Output video width in pixels (682 = reduced from 1280, maintains aspect ratio)
+    "target_width": 682,
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // DENOISING SCHEDULE - CRITICAL FOR QUALITY
+    // ═══════════════════════════════════════════════════════════════
+    
+    // Total inference steps: 4 steps (distilled model uses fixed timesteps)
+    // More steps = higher quality but slower
+    "infer_steps": 4,
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // ATTENTION MECHANISMS
+    // ═══════════════════════════════════════════════════════════════
+    
+    // Self-attention type: "sage_attn2" = Memory-efficient attention implementation
+    // Reduces memory usage while maintaining quality
+    "self_attn_1_type": "sage_attn2",
+    
+    // Cross-attention type 1: Text-to-video attention mechanism
+    "cross_attn_1_type": "sage_attn2",
+    
+    // Cross-attention type 2: Secondary cross-attention layer
+    "cross_attn_2_type": "sage_attn2",
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // CLASSIFIER-FREE GUIDANCE (CFG) - PROMPT ADHERENCE
+    // ═══════════════════════════════════════════════════════════════
+    
+    // CFG scale range: [conditional_scale, unconditional_scale]
+    // [3.5, 4.0] = Moderate guidance strength
+    // Higher values = stronger prompt adherence but potential artifacts
+    // Lower values = more creative but may ignore prompt details
+    "sample_guide_scale": [3.5, 4.0],
+    
+    // Sample shift: Controls noise schedule distribution
+    // 4.0 = Balanced between speed and quality
+    // Higher = More steps at low noise (better details)
+    // Lower = More steps at high noise (faster but less detailed)
+    "sample_shift": 4.0,
+    
+    // Enable CFG: true = uses classifier-free guidance for better prompt following
+    "enable_cfg": true,
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // CPU OFFLOADING GRANULARITY
+    // ═══════════════════════════════════════════════════════════════
+    
+    // Offload granularity: "block" = offload per transformer block
+    // Options: "model" (whole model), "block" (per layer), "op" (per operation)
+    // "block" provides best balance of memory savings vs speed
+    "offload_granularity": "block",
+    
+    // T5 encoder CPU offloading (disabled for speed since T5 is only used once)
+    "t5_cpu_offload": false,
+    
+    // VAE CPU offloading (disabled for speed since VAE is used at start/end)
+    "vae_cpu_offload": false,
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // TWO-STAGE DISTILLATION PARAMETERS
+    // ═══════════════════════════════════════════════════════════════
+    
+    // Boundary step index: Switches from high_noise to low_noise model after step 2
+    // Steps 0-1 use high_noise_model (timesteps 1000, 750)
+    // Steps 2-3 use low_noise_model (timesteps 500, 250)
+    "boundary_step_index": 2,
+    
+    // High noise timesteps: First 2 denoising steps
+    // 1000 = Maximum noise (pure random noise)
+    // 750 = High noise (establishing structure)
+    "denoising_step_list_high": [1000, 750],
+    
+    // Low noise timesteps: Last 2 denoising steps
+    // 500 = Medium noise (refining composition)
+    // 250 = Low noise (adding fine details)
+    "denoising_step_list_low": [500, 250],
+    
+    // Combined timestep list (automatically built from high + low)
+    // Model was trained on these specific timesteps (distillation)
+    "denoising_step_list": [1000, 750, 500, 250],
+    
+    
+    // ═══════════════════════════════════════════════════════════════
+    // LORA ADAPTERS - MODEL FINE-TUNING
+    // ═══════════════════════════════════════════════════════════════
+    
+    // LoRA configurations: Low-Rank Adaptation weights
+    // Allows model specialization without full retraining
+    "lora_configs": [
+        {
+            // High noise LoRA: Applied during steps 0-1
+            "name": "high_noise_model",
+            "path": "models/wan2.2_models/official_distill_repo/loras/high_noise_model_rank64.safetensors",
+            // Strength 1.0 = full LoRA influence
+            "strength": 1.0
+        },
+        {
+            // Low noise LoRA: Applied during steps 2-3
+            "name": "low_noise_model",
+            "path": "models/wan2.2_models/official_distill_repo/loras/low_noise_model_rank64.safetensors",
+            "strength": 1.0
+        }
+    ]
+}
