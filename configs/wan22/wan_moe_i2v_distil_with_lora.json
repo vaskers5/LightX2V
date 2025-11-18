@@ -1,9 +1,54 @@
 {
-    "infer_steps": 4,
-    "target_video_length": 81,
+    "preset": "Distill + LoRA",
+    "model_cls": "wan2.2_moe",
+    "task": "i2v",
+    "model_path": "models/wan2.2_models/official_distill_repo",
+    "sf_model_path": null,
+    "high_noise_original_ckpt": "models/wan2.2_models/official_distill_repo/distill_models/high_noise_model/distill_model.safetensors",
+    "low_noise_original_ckpt": "models/wan2.2_models/official_distill_repo/distill_models/low_noise_model/distill_model.safetensors",
+    "vae_path": "models/wan2.2_models/vae/Wan2.2_VAE.safetensors",
+    "t5_original_ckpt": "models/wan2.2_models/encoders/models_t5_umt5-xxl-enc-bf16.safetensors",
+    "clip_original_ckpt": "models/wan2.2_models/encoders/models_clip_open-clip-xlm-roberta-large-vit-huge-14.safetensors",
+    "_class_name": "WanModel",
+    "_diffusers_version": "0.33.0",
+    "dim": 5120,
+    "eps": 1e-06,
+    "ffn_dim": 13824,
+    "freq_dim": 256,
+    "in_dim": 36,
+    "model_type": "i2v",
+    "num_heads": 40,
+    "num_layers": 40,
+    "out_dim": 16,
     "text_len": 512,
+    "do_mm_calib": false,
+    "cpu_offload": true,
+    "max_area": false,
+    "vae_stride": [
+        4,
+        8,
+        8
+    ],
+    "patch_size": [
+        1,
+        2,
+        2
+    ],
+    "feature_caching": "NoCaching",
+    "teacache_thresh": 0.26,
+    "use_ret_steps": false,
+    "use_bfloat16": true,
+    "use_prompt_enhancer": false,
+    "parallel": false,
+    "seq_parallel": false,
+    "cfg_parallel": false,
+    "use_image_encoder": false,
+    "attnmap_frame_num": 21,
+    "boundary": 0.9,
+    "target_video_length": 81,
     "target_height": 720,
     "target_width": 1280,
+    "infer_steps": 4,
     "self_attn_1_type": "sage_attn2",
     "cross_attn_1_type": "sage_attn2",
     "cross_attn_2_type": "sage_attn2",
@@ -13,11 +58,9 @@
     ],
     "sample_shift": 5.0,
     "enable_cfg": false,
-    "cpu_offload": true,
     "offload_granularity": "block",
     "t5_cpu_offload": false,
     "vae_cpu_offload": false,
-    "use_image_encoder": false,
     "boundary_step_index": 2,
     "denoising_step_list": [
         1000,
@@ -28,12 +71,12 @@
     "lora_configs": [
         {
             "name": "high_noise_model",
-            "path": "lightx2v/Wan2.2-Distill-Loras/wan2.2_i2v_A14b_high_noise_lora_rank64_lightx2v_4step_1022.safetensors",
+            "path": "models/wan2.2_models/official_distill_repo/loras/high_noise_model_rank64.safetensors",
             "strength": 1.0
         },
         {
             "name": "low_noise_model",
-            "path": "lightx2v/Wan2.2-Distill-Loras/wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors",
+            "path": "models/wan2.2_models/official_distill_repo/loras/low_noise_model_rank64.safetensors",
             "strength": 1.0
         }
     ]
