@@ -54,17 +54,18 @@ class QualityInferenceDemo:
         self.current_config_hash: Optional[str] = None
 
     def _get_config_hash(self, config: Dict[str, Any]) -> str:
-        """Get a hash of config to detect changes."""
-        # Hash only the important model-related settings
+        """Get a hash of config to detect changes that require model reload."""
+        # Hash only settings that require model reload
+        # NOTE: Video settings, CFG, etc. don't require reload
         important_keys = [
-            "target_height", "target_width", "target_video_length",
-            "infer_steps", "cpu_offload", "lora_configs"
+            "cpu_offload",  # Changes offloading behavior
+            "lora_configs"  # LoRA changes require reload
         ]
         config_subset = {k: config.get(k) for k in important_keys}
         return str(hash(json.dumps(config_subset, sort_keys=True)))
 
     def _load_runner(self, config: Dict[str, Any], force_reload: bool = False):
-        """Load or reload the runner if config changed.
+        """Load or reload the runner only if necessary.
         
         Args:
             config: Configuration dictionary
@@ -72,13 +73,8 @@ class QualityInferenceDemo:
         """
         config_hash = self._get_config_hash(config)
         
-        if self.runner is None or force_reload or config_hash != self.current_config_hash:
-            logger.info("Loading runner with updated configuration...")
-            
-            # Clear existing runner
-            if self.runner is not None:
-                del self.runner
-                torch.cuda.empty_cache()
+        if self.runner is None:
+            logger.info("Loading runner for the first time...")
             
             # Disable gradients
             torch.set_grad_enabled(False)
@@ -88,7 +84,29 @@ class QualityInferenceDemo:
             self.runner.init_modules()
             self.current_config_hash = config_hash
             
-            logger.info("Runner loaded successfully")
+            logger.info("✓ Runner loaded successfully")
+        
+        elif force_reload or config_hash != self.current_config_hash:
+            logger.info("Configuration changed - reloading runner...")
+            
+            # Clear existing runner
+            if self.runner is not None:
+                del self.runner
+                torch.cuda.empty_cache()
+                import gc
+                gc.collect()
+            
+            # Disable gradients
+            torch.set_grad_enabled(False)
+            
+            # Create runner
+            self.runner = Wan22MoeCustomRunner(config)
+            self.runner.init_modules()
+            self.current_config_hash = config_hash
+            
+            logger.info("✓ Runner reloaded successfully")
+        else:
+            logger.info("✓ Reusing existing runner (config unchanged)")
 
     def generate_video(
         self,
@@ -142,17 +160,16 @@ class QualityInferenceDemo:
             
             # Create temporary args namespace for compatibility
             class Args:
-                def __init__(self):
-                    self.model_cls = "wan2.2_moe_distill"
-                    self.task = "i2v"
-                    self.model_path = str(self.model_path)
-                    self.config_json = str(self.config_path)
-                    self.seed = seed
-                    self.use_prompt_enhancer = False
-                    self.return_result_tensor = False
+                pass
             
             args = Args()
+            args.model_cls = "wan2.2_moe_distill"
+            args.task = "i2v"
             args.model_path = str(self.model_path)
+            args.config_json = str(self.config_path)
+            args.seed = seed
+            args.use_prompt_enhancer = False
+            args.return_result_tensor = False
             
             progress(0.1, desc="Building configuration...")
             

@@ -188,6 +188,26 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
         
         return multi_model
 
+    def cleanup_after_inference(self):
+        """Clean up GPU memory after inference for repeated generations.
+        
+        This method should be called after each inference to prevent OOM errors
+        when running multiple generations in sequence (e.g., in a Gradio demo).
+        """
+        import gc
+        
+        logger.info("Cleaning up GPU memory...")
+        
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        
+        # Force garbage collection
+        gc.collect()
+        
+        logger.info("✓ Memory cleanup complete")
+
     def run_pipeline(self, input_info):
         """Run the complete inference pipeline with custom hooks.
         
@@ -205,6 +225,9 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
         
         # Call the base implementation
         result = super().run_pipeline(input_info)
+        
+        # Clean up memory after inference
+        self.cleanup_after_inference()
         
         logger.info("=" * 80)
         logger.info("✓ Custom distilled inference pipeline complete!")
