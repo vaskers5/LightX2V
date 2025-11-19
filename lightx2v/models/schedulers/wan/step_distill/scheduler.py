@@ -1,21 +1,64 @@
 import math
-from typing import Union
+from typing import List, Union
 
 import torch
+from loguru import logger
 
 from lightx2v.models.schedulers.wan.scheduler import WanScheduler
 
 
 class WanStepDistillScheduler(WanScheduler):
     def __init__(self, config):
+        requested_infer_steps = config.get("infer_steps")
+        denoising_step_list = self._build_denoising_schedule(config)
+
+        config["denoising_step_list"] = denoising_step_list
+        config["infer_steps"] = len(denoising_step_list)
+        if requested_infer_steps is not None and requested_infer_steps != config["infer_steps"]:
+            logger.warning(
+                "infer_steps=%s does not match len(denoising_step_list)=%s, overriding to %s",
+                requested_infer_steps,
+                len(denoising_step_list),
+                len(denoising_step_list),
+            )
+
         super().__init__(config)
-        self.denoising_step_list = config["denoising_step_list"]
+        self.denoising_step_list = denoising_step_list
         self.infer_steps = len(self.denoising_step_list)
         self.sample_shift = self.config["sample_shift"]
 
         self.num_train_timesteps = 1000
         self.sigma_max = 1.0
         self.sigma_min = 0.0
+
+    @staticmethod
+    def _build_denoising_schedule(config) -> List[int]:
+        high_steps = config.get("denoising_step_list_high")
+        low_steps = config.get("denoising_step_list_low")
+
+        if high_steps or low_steps:
+            if not high_steps or not low_steps:
+                raise ValueError("Both `denoising_step_list_high` and `denoising_step_list_low` must be provided together")
+            combined_steps = list(high_steps) + list(low_steps)
+            config.setdefault("boundary_step_index", len(high_steps))
+        else:
+            base_list = config.get("denoising_step_list")
+            if not base_list:
+                raise ValueError("`denoising_step_list` must be provided for WanStepDistillScheduler")
+            combined_steps = list(base_list)
+
+        max_timestep = config.get("num_train_timesteps", 1000)
+        normalized_steps = [int(step) for step in combined_steps]
+        if len(normalized_steps) < 1:
+            raise ValueError("`denoising_step_list` must contain at least one timestep")
+
+        if any(normalized_steps[idx] <= normalized_steps[idx + 1] for idx in range(len(normalized_steps) - 1)):
+            raise ValueError("`denoising_step_list` must be strictly decreasing")
+
+        if any(step > max_timestep or step < 0 for step in normalized_steps):
+            raise ValueError(f"`denoising_step_list` values must be within [0, {max_timestep}]")
+
+        return normalized_steps
 
     def prepare(self, seed, latent_shape, image_encoder_output=None):
         self.prepare_latents(seed, latent_shape, dtype=torch.float32)
@@ -52,7 +95,15 @@ class WanStepDistillScheduler(WanScheduler):
 class Wan22StepDistillScheduler(WanStepDistillScheduler):
     def __init__(self, config):
         super().__init__(config)
-        self.boundary_step_index = config["boundary_step_index"]
+        max_index = self.infer_steps - 1
+        requested_boundary = config.get("boundary_step_index", max_index)
+        if requested_boundary > max_index or requested_boundary < 0:
+            logger.warning(
+                f"boundary_step_index={requested_boundary} is out of range for {self.infer_steps} steps, clamping to [0, {max_index}]"
+            )
+            requested_boundary = min(max(requested_boundary, 0), max_index)
+
+        self.boundary_step_index = requested_boundary
 
     def set_denoising_timesteps(self, device: Union[str, torch.device] = None):
         super().set_denoising_timesteps(device)

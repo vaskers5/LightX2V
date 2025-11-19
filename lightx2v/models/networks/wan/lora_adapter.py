@@ -87,20 +87,42 @@ class WanLoraWrapper:
                 if name not in self.override_dict:
                     self.override_dict[name] = param.clone().cpu()
                 name_lora_A, name_lora_B = lora_pairs[name]
+                
+                # Handle FP8 weights: convert to bfloat16, apply LoRA, convert back
+                is_fp8 = param.dtype == torch.float8_e4m3fn
+                original_dtype = param.dtype
+                if is_fp8:
+                    param.data = param.data.to(torch.bfloat16)
+                
                 lora_A = lora_weights[name_lora_A].to(param.device, param.dtype)
                 lora_B = lora_weights[name_lora_B].to(param.device, param.dtype)
                 if param.shape == (lora_B.shape[0], lora_A.shape[1]):
                     param += torch.matmul(lora_B, lora_A) * alpha
                     applied_count += 1
+                
+                # Convert back to FP8 if needed
+                if is_fp8:
+                    param.data = param.data.to(original_dtype)
             elif name in lora_diffs:
                 if name not in self.override_dict:
                     self.override_dict[name] = param.clone().cpu()
 
                 name_diff = lora_diffs[name]
+                
+                # Handle FP8 weights
+                is_fp8 = param.dtype == torch.float8_e4m3fn
+                original_dtype = param.dtype
+                if is_fp8:
+                    param.data = param.data.to(torch.bfloat16)
+                
                 lora_diff = lora_weights[name_diff].to(param.device, param.dtype)
                 if param.shape == lora_diff.shape:
                     param += lora_diff * alpha
                     applied_count += 1
+                
+                # Convert back to FP8 if needed
+                if is_fp8:
+                    param.data = param.data.to(original_dtype)
 
         logger.info(f"Applied {applied_count} LoRA weight adjustments")
         if applied_count == 0:

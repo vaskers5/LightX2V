@@ -298,7 +298,8 @@ class WanModel(CompiledMethodsMixin):
         self.pre_weight.load(self.original_weight_dict)
         self.transformer_weights.load(self.original_weight_dict)
 
-        del self.original_weight_dict
+        # Keep original_weight_dict for LoRA support instead of deleting it
+        # del self.original_weight_dict
         torch.cuda.empty_cache()
         gc.collect()
 
