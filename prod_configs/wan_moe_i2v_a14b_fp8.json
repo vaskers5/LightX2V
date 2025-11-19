@@ -7,7 +7,7 @@
     "high_noise_quantized_ckpt": "models/wan2.2_models/distill_models/wan2.2_i2v_A14b_high_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
     "low_noise_quantized_ckpt": "models/wan2.2_models/distill_models/wan2.2_i2v_A14b_low_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
     "vae_path": "models/wan2.2_models/vae/Wan2.1_VAE.pth",
-    "t5_original_ckpt": "models/wan2.2_models/encoders/models_t5_umt5-xxl-enc-bf16.pth",
+    "t5_original_ckpt": "models/wan2.2_models/encoders/models_t5_umt5-xxl-enc-bf16_fully_uncensored.safetensors",
     "clip_original_ckpt": "models/wan2.2_models/encoders/models_clip_open-clip-xlm-roberta-large-vit-huge-14.safetensors",
     "_class_name": "WanModel",
     "_diffusers_version": "0.33.0",
