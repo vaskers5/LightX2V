@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Run WAN2.2-MOE i2v quality inference directly via custom Wan22MoeRunner.
+"""Run WAN2.2-MOE i2v quality inference with motion amplitude enhancement.
 
-This script reproduces the exact results of the default inference command:
+This script reproduces the exact results of the default inference command
+with additional motion enhancement to fix slow-motion issues in 4-step LoRAs:
 
     CUDA_VISIBLE_DEVICES=7 python -m lightx2v.infer \
         --model_cls wan2.2_moe \
@@ -18,38 +19,111 @@ ARCHITECTURE OVERVIEW:
 This script demonstrates a custom runner pattern for WAN2.2-MOE inference:
 
 1. **Wan22MoeCustomRunner** (defined in this file)
-   └── Inherits from: **Wan22MoeRunner** (lightx2v.models.runners.wan.wan_runner)
-       └── Inherits from: **WanRunner** (base WAN runner class)
-           └── Inherits from: **DefaultRunner** (lightx2v.models.runners.default_runner)
+   └── Inherits from: **Wan22MoeDistillRunner** (lightx2v.models.runners.wan.wan_distill_runner)
+       └── Inherits from: **WanDistillRunner** (base WAN distill runner class)
+           └── Inherits from: **WanRunner** (base WAN runner class)
+               └── Inherits from: **DefaultRunner** (lightx2v.models.runners.default_runner)
 
 2. **Key Customizations**:
    - `__init__()`: Enhanced logging of model paths during initialization
    - `load_transformer()`: Custom LoRA loading using config 'name' field
-   - `_apply_loras()`: Helper method for applying LoRAs to high/low noise models
+   - `get_vae_encoder_output()`: Motion amplitude enhancement for VAE latents
    - `run_pipeline()`: Wrapped pipeline with custom logging hooks
 
-3. **Base Runner Responsibilities** (inherited):
+3. **Motion Enhancement Classes** (NEW):
+   - `MotionAmplitudeProcessor`: Core algorithm for fixing slow-motion issues
+   - `EnhancedVAEEncoder`: Wrapper for VAE encoder with motion enhancement
+   
+4. **Base Runner Responsibilities** (inherited):
    - Model loading (VAE, text encoders, image encoder)
    - Scheduler initialization
    - Text encoding pipeline
    - VAE encoding/decoding
    - Video generation and saving
 
-4. **MultiModelStruct**: Manages the two-stage distilled inference
+5. **MultiDistillModelStruct**: Manages the two-stage distilled inference
    - High noise model (used for early denoising steps)
    - Low noise model (used for final refinement steps)
    - Automatic switching based on boundary timestep
 
+MOTION ENHANCEMENT:
+===================
+
+The motion amplitude enhancement fixes the "slow-motion" problem in 4-step distilled models:
+
+1. **Problem**: Fast distilled models (4-8 steps) often produce slow, subtle motion
+2. **Solution**: Amplify motion in VAE latent space while preserving brightness
+3. **Algorithm**:
+   - Extract first frame (real) and subsequent frames (gray-filled)
+   - Calculate motion difference: diff = gray_frames - first_frame
+   - Preserve brightness: extract and re-add mean of difference
+   - Amplify centered motion: scaled = first_frame + (diff - mean) * amplitude + mean
+   - Clamp to prevent artifacts: clamp(scaled, -6, 6)
+
+4. **Configuration**:
+   - Default amplitude: 1.15 (15% more motion)
+   - Recommended range: 1.0 (disabled) to 1.5 (50% more motion)
+   - Disable via: --disable_motion_enhancement
+
+MEMORY OPTIMIZATION (CPU OFFLOADING):
+======================================
+
+Reduce GPU memory usage by offloading T5 encoder and VAE to CPU when not in use:
+
+1. **T5 CPU Offloading** (t5_cpu_offload):
+   - T5 encoder is kept on CPU by default
+   - Loaded to GPU only during text encoding
+   - Immediately offloaded back to CPU after encoding
+   - Saves ~8-10GB VRAM
+
+2. **VAE CPU Offloading** (vae_cpu_offload):
+   - VAE encoder is kept on CPU by default
+   - Loaded to GPU only during image encoding
+   - VAE decoder is kept on CPU by default
+   - Loaded to GPU only during latent decoding
+   - Saves ~2-4GB VRAM
+
+3. **Configuration**:
+   - Enable in config: "t5_cpu_offload": true, "vae_cpu_offload": true
+   - FP8 config has offloading enabled by default
+   - Quality config has offloading disabled by default (for max speed)
+   - Total VRAM savings: ~10-14GB with both enabled
+
+4. **Performance Impact**:
+   - Adds ~2-5 seconds per inference (data transfer overhead)
+   - Essential for GPUs with <24GB VRAM
+   - Recommended for FP8 + LoRA workflows on consumer GPUs
+
 USAGE:
 ======
 
-Run with defaults (matches the reference command):
+Run with defaults (motion enhancement enabled, amplitude=1.15):
     CUDA_VISIBLE_DEVICES=7 python scripts/wan22/run_quality_inference.py
+
+Use FP8 config with offloading (saves ~10-14GB VRAM):
+    CUDA_VISIBLE_DEVICES=7 python scripts/wan22/run_quality_inference.py \
+        --config_json prod_configs/wan_moe_i2v_a14b_fp8.json
+
+Adjust motion amplitude:
+    CUDA_VISIBLE_DEVICES=7 python scripts/wan22/run_quality_inference.py \
+        --motion_amplitude 1.3
+
+Disable motion enhancement:
+    CUDA_VISIBLE_DEVICES=7 python scripts/wan22/run_quality_inference.py \
+        --disable_motion_enhancement
 
 Override specific parameters:
     CUDA_VISIBLE_DEVICES=7 python scripts/wan22/run_quality_inference.py \
         --prompt "woman laughing and waving" \
-        --save_result_path save_results/custom_output.mp4
+        --save_result_path save_results/custom_output.mp4 \
+        --motion_amplitude 1.25
+
+For low VRAM GPUs (12-16GB), enable offloading in config:
+    Edit prod_configs/wan_moe_i2v_a14b_quality.json:
+    {
+        "t5_cpu_offload": true,
+        "vae_cpu_offload": true
+    }
 
 Add custom LoRAs (edit the config JSON):
     Add to "lora_configs" in prod_configs/wan_moe_i2v_a14b_quality.json:
@@ -58,6 +132,12 @@ Add custom LoRAs (edit the config JSON):
         "path": "models/wan2.2_models/loras/my_lora.safetensors",
         "strength": 0.8
     }
+
+CREDITS:
+========
+
+Motion enhancement algorithm based on PainterI2V from the ComfyUI community,
+specifically designed to fix slow-motion issues in lightx2v and similar 4-step LoRAs.
 """
 
 from __future__ import annotations
@@ -65,11 +145,13 @@ from __future__ import annotations
 import argparse
 import gc
 import os
+from typing import Optional
 
 import torch
 from loguru import logger
 from safetensors import safe_open
 
+from lightx2v.common.offload.manager import WeightAsyncStreamManager
 from lightx2v.models.networks.wan.distill_model import WanDistillModel
 from lightx2v.models.networks.wan.model import WanModel
 from lightx2v.models.runners.wan.wan_distill_runner import MultiDistillModelStruct, Wan22MoeDistillRunner
@@ -77,6 +159,168 @@ from lightx2v.utils.envs import *
 from lightx2v.utils.input_info import set_input_info
 from lightx2v.utils.set_config import print_config, set_config
 from lightx2v.utils.utils import seed_all
+
+
+class CustomWeightAsyncStreamManager(WeightAsyncStreamManager):
+    """
+    Custom weight manager that extends WeightAsyncStreamManager with swap_weights method.
+    
+    This class adds the missing swap_weights method that's called by T5 encoder's
+    forward_with_offload method. It implements CPU-GPU weight swapping for model offloading.
+    
+    The swap_weights method synchronizes streams and swaps the double-buffered CUDA buffers,
+    allowing the next block's weights to become active while the current block's buffer
+    can be reused for prefetching the following block.
+    """
+    
+    def __init__(self, offload_granularity):
+        """
+        Initialize custom weight manager.
+        
+        Args:
+            offload_granularity (str): Granularity of offloading ("block" or "phase")
+        """
+        super().__init__(offload_granularity)
+        logger.debug(f"Initialized CustomWeightAsyncStreamManager (granularity={offload_granularity})")
+    
+    def swap_weights(self):
+        """
+        Swap the double-buffered CUDA weight buffers.
+        
+        This method implements the missing functionality by calling the parent's
+        swap method based on the offload granularity:
+        - For "block" granularity: swaps block buffers
+        - For "phase" granularity: swaps phase buffers
+        
+        The method ensures proper synchronization between compute and loading streams
+        before swapping buffers.
+        """
+        if self.offload_granularity == "block":
+            self.swap_blocks()
+        elif self.offload_granularity == "phase":
+            self.swap_phases()
+        else:
+            raise ValueError(f"Unknown offload granularity: {self.offload_granularity}")
+
+
+class MotionAmplitudeProcessor:
+    """
+    Enhanced latent processor to fix slow-motion issues in 4-step LoRAs.
+    
+    This class implements the motion amplitude enhancement algorithm that addresses
+    the slow-motion problem common in distilled models by:
+    1. Analyzing the difference between first frame and subsequent frames
+    2. Amplifying motion while preserving brightness (diff_mean preservation)
+    3. Clamping to prevent artifacts
+    
+    Based on the PainterI2V optimization from ComfyUI community.
+    """
+    
+    def __init__(self, motion_amplitude=1.15, enable=True):
+        """
+        Initialize the motion amplitude processor.
+        
+        Args:
+            motion_amplitude (float): Motion scaling factor. 
+                                     1.0 = no change, >1.0 = more motion
+                                     Recommended: 1.15-1.5 for 4-step LoRAs
+            enable (bool): Whether to apply motion enhancement
+        """
+        self.motion_amplitude = motion_amplitude
+        self.enable = enable
+        logger.info(f"MotionAmplitudeProcessor initialized (amplitude={motion_amplitude}, enabled={enable})")
+    
+    @torch.no_grad()
+    def apply_motion_enhancement(self, vae_latent):
+        """
+        Apply motion amplitude enhancement to VAE-encoded latents.
+        
+        Args:
+            vae_latent (torch.Tensor): VAE encoded latent of shape [C, T, H, W]
+                                       where C=channels, T=time, H=height, W=width
+                                       The first temporal frame is real, subsequent frames
+                                       are gray/zero-filled placeholders
+        
+        Returns:
+            torch.Tensor: Enhanced latent with amplified motion while preserving brightness
+        """
+        if not self.enable or self.motion_amplitude <= 1.0:
+            return vae_latent
+        
+        logger.debug(f"Applying motion enhancement (amplitude={self.motion_amplitude})...")
+        logger.debug(f"VAE latent shape: {vae_latent.shape}")
+        
+        # Extract first temporal frame (real) and subsequent frames (gray/zero placeholders)
+        # Shape: vae_latent is [C, T, H, W] (4D tensor from WAN VAE encoder)
+        base_latent = vae_latent[:, 0:1, :, :]      # [C, 1, H, W] - first frame
+        gray_latent = vae_latent[:, 1:, :, :]       # [C, T-1, H, W] - gray frames
+        
+        # Calculate motion difference
+        diff = gray_latent - base_latent
+        
+        # Preserve brightness by extracting and re-adding mean
+        # This is the KEY to preventing brightness changes during motion amplification
+        # Average across channels (0), height (2), width (3), keep time (1)
+        diff_mean = diff.mean(dim=(0, 2, 3), keepdim=True)
+        diff_centered = diff - diff_mean
+        
+        # Amplify centered motion and restore mean
+        scaled_latent = base_latent + diff_centered * self.motion_amplitude + diff_mean
+        
+        # Clamp to prevent artifacts (empirically determined range for latent space)
+        scaled_latent = torch.clamp(scaled_latent, -6, 6)
+        
+        # Combine first frame with enhanced frames along temporal dimension (dim=1)
+        enhanced_latent = torch.cat([base_latent, scaled_latent], dim=1)
+        
+        logger.debug(f"Motion enhancement applied. Original range: [{vae_latent.min():.3f}, {vae_latent.max():.3f}], "
+                    f"Enhanced range: [{enhanced_latent.min():.3f}, {enhanced_latent.max():.3f}]")
+        
+        return enhanced_latent
+
+
+class EnhancedVAEEncoder:
+    """
+    Wrapper for VAE encoder that applies motion amplitude enhancement.
+    
+    This class wraps the standard VAE encoding process and adds motion
+    enhancement as a post-processing step, making it easy to integrate
+    into existing inference pipelines.
+    """
+    
+    def __init__(self, vae_encoder, motion_processor=None):
+        """
+        Initialize enhanced VAE encoder.
+        
+        Args:
+            vae_encoder: Original VAE encoder model
+            motion_processor (MotionAmplitudeProcessor): Optional motion processor
+        """
+        self.vae_encoder = vae_encoder
+        self.motion_processor = motion_processor or MotionAmplitudeProcessor(enable=False)
+    
+    def encode(self, vae_input):
+        """
+        Encode input with motion enhancement.
+        
+        Args:
+            vae_input: Input tensor for VAE encoding
+            
+        Returns:
+            Enhanced VAE latent
+        """
+        # Standard VAE encoding
+        vae_latent = self.vae_encoder.encode(vae_input)
+        
+        # Apply motion enhancement if enabled
+        if self.motion_processor.enable:
+            vae_latent = self.motion_processor.apply_motion_enhancement(vae_latent)
+        
+        return vae_latent
+    
+    def __getattr__(self, name):
+        """Forward all other attributes to the wrapped VAE encoder."""
+        return getattr(self.vae_encoder, name)
 
 
 class WanLoraCustomWrapper:
@@ -221,13 +465,14 @@ class WanLoraCustomWrapper:
 
 
 class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
-    """Custom WAN2.2-MOE Distill runner with enhanced LoRA handling and extensibility.
+    """Custom WAN2.2-MOE Distill runner with enhanced LoRA handling and motion optimization.
     
     This runner extends Wan22MoeDistillRunner (the DISTILLED version) to provide:
     - Custom LoRA loading logic based on config 'name' field
     - Support for distilled models (WanDistillModel)
     - FP8 quantization support with SGLang optimization
     - **Combined FP8 + LoRA support** (applies LoRAs on top of quantized models)
+    - **Motion amplitude enhancement** for fixing slow-motion issues in 4-step LoRAs
     - Easy hooks for pre/post-processing customization
     - Better logging and monitoring capabilities
     
@@ -240,6 +485,12 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
     - **FP8 + LoRA**: Uses quantized WanDistillModel + LoRAs (BEST: fast + custom styles)
     - Neither: Uses WanDistillModel (full precision)
     
+    Motion Enhancement:
+    - Enabled by default for 4-step distilled models (motion_amplitude=1.15)
+    - Amplifies motion while preserving brightness
+    - Prevents the "slow-motion" effect common in fast distilled inference
+    - Can be disabled via config: "motion_amplitude": 1.0 or "enable_motion_enhancement": false
+    
     Supports fp8-sgl (SGLang for H100/Ada), fp8-q8f (Q8F for 4090), and other schemes.
     """
 
@@ -250,9 +501,24 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
             config: Configuration dictionary containing model paths, hyperparameters, etc.
         """
         super().__init__(config)
+        
+        # Initialize motion amplitude processor
+        motion_amplitude = self.config.get("motion_amplitude", 1.15)
+        enable_motion = self.config.get("enable_motion_enhancement", True)
+        self.motion_processor = MotionAmplitudeProcessor(
+            motion_amplitude=motion_amplitude,
+            enable=enable_motion
+        )
+        
         logger.info(f"Initialized {self.__class__.__name__} (Distilled version)")
         logger.info(f"High noise model path: {self.high_noise_model_path}")
         logger.info(f"Low noise model path: {self.low_noise_model_path}")
+        
+        # Log motion enhancement settings
+        if enable_motion:
+            logger.info(f"✓ Motion enhancement enabled (amplitude={motion_amplitude})")
+        else:
+            logger.info("✗ Motion enhancement disabled")
         
         # Log quantization settings
         if self.config.get("dit_quantized", False):
@@ -262,6 +528,80 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
         # Log LoRA settings
         if self.config.get("lora_configs"):
             logger.info(f"LoRA configurations: {len(self.config['lora_configs'])} LoRA(s) configured")
+    
+    def _patch_t5_offload_manager(self):
+        """
+        Patch T5 encoder's offload manager with custom implementation.
+        
+        This method replaces the T5 encoder's WeightAsyncStreamManager with our
+        CustomWeightAsyncStreamManager that includes the swap_weights method.
+        This is necessary because the original manager lacks this method.
+        """
+        if not hasattr(self, 'text_encoders') or not self.text_encoders:
+            return
+        
+        t5_encoder = self.text_encoders[0]
+        
+        # Check if T5 encoder has an offload manager
+        if hasattr(t5_encoder, 'model') and hasattr(t5_encoder.model, 'offload_manager'):
+            original_manager = t5_encoder.model.offload_manager
+            
+            # Create custom manager with same granularity
+            custom_manager = CustomWeightAsyncStreamManager(
+                offload_granularity=original_manager.offload_granularity
+            )
+            
+            # Copy all attributes from original manager to custom manager
+            for attr_name in dir(original_manager):
+                if not attr_name.startswith('_') and attr_name not in ['swap_weights', 'swap_blocks', 'swap_phases']:
+                    try:
+                        attr_value = getattr(original_manager, attr_name)
+                        if not callable(attr_value):
+                            setattr(custom_manager, attr_name, attr_value)
+                    except AttributeError:
+                        pass
+            
+            # Replace the offload manager
+            t5_encoder.model.offload_manager = custom_manager
+            logger.info("✓ Patched T5 encoder with CustomWeightAsyncStreamManager")
+        elif hasattr(t5_encoder, 'text_encoder') and hasattr(t5_encoder.text_encoder, 'offload_manager'):
+            original_manager = t5_encoder.text_encoder.offload_manager
+            
+            # Create custom manager with same granularity
+            custom_manager = CustomWeightAsyncStreamManager(
+                offload_granularity=original_manager.offload_granularity
+            )
+            
+            # Copy all attributes from original manager to custom manager
+            for attr_name in dir(original_manager):
+                if not attr_name.startswith('_') and attr_name not in ['swap_weights', 'swap_blocks', 'swap_phases']:
+                    try:
+                        attr_value = getattr(original_manager, attr_name)
+                        if not callable(attr_value):
+                            setattr(custom_manager, attr_name, attr_value)
+                    except AttributeError:
+                        pass
+            
+            # Replace the offload manager
+            t5_encoder.text_encoder.offload_manager = custom_manager
+            logger.info("✓ Patched T5 encoder with CustomWeightAsyncStreamManager")
+    
+    def init_modules(self):
+        """
+        Initialize runner modules and patch T5 offload manager.
+        
+        This override calls the parent implementation to load all modules,
+        then patches the T5 encoder's offload manager with our custom implementation.
+        """
+        # Call parent to initialize all modules
+        super().init_modules()
+        
+        # Patch T5 offload manager after text encoders are loaded
+        if self.config.get("t5_cpu_offload", False):
+            logger.info("T5 CPU offload is enabled, patching offload manager...")
+            self._patch_t5_offload_manager()
+
+
 
     def load_transformer(self):
         """Load high and low noise distilled transformer models with custom LoRA and FP8 support.
@@ -414,6 +754,192 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
         
         return multi_model
 
+    def run_text_encoder(self, input_info):
+        """
+        Override text encoder to support T5 offloading during inference.
+        
+        This method handles T5 encoder offloading by:
+        1. Loading T5 to GPU if it's on CPU (offloaded)
+        2. Running text encoding
+        3. Offloading T5 back to CPU if configured
+        4. Clearing GPU cache to free memory for transformer inference
+        
+        Args:
+            input_info: Input information containing prompts
+            
+        Returns:
+            Text encoder output dictionary with context embeddings
+        """
+        t5_offload = self.config.get("t5_cpu_offload", False)
+        
+        if t5_offload:
+            logger.info("Loading T5 encoder to GPU for text encoding...")
+            if self.config.get("lazy_load", False) or self.config.get("unload_modules", False):
+                self.text_encoders = self.load_text_encoder()
+            # Move T5 to GPU
+            if hasattr(self.text_encoders[0], 'model'):
+                self.text_encoders[0].model = self.text_encoders[0].model.cuda()
+            elif hasattr(self.text_encoders[0], 'text_encoder'):
+                self.text_encoders[0].text_encoder = self.text_encoders[0].text_encoder.cuda()
+        
+        # Call parent implementation for actual text encoding
+        result = super().run_text_encoder(input_info)
+        
+        if t5_offload:
+            logger.info("Offloading T5 encoder to CPU...")
+            # Move T5 back to CPU
+            if hasattr(self.text_encoders[0], 'model'):
+                self.text_encoders[0].model = self.text_encoders[0].model.cpu()
+            elif hasattr(self.text_encoders[0], 'text_encoder'):
+                self.text_encoders[0].text_encoder = self.text_encoders[0].text_encoder.cpu()
+            
+            # Clear GPU cache
+            torch.cuda.empty_cache()
+            gc.collect()
+            logger.info("✓ T5 offloaded, GPU memory freed")
+        
+        return result
+
+    def get_vae_encoder_output(self, first_frame, lat_h, lat_w, last_frame=None):
+        """
+        Override VAE encoder output to apply motion amplitude enhancement.
+        
+        This method wraps the base implementation and adds motion enhancement
+        to fix slow-motion issues in 4-step distilled models.
+        
+        Args:
+            first_frame: First frame tensor
+            lat_h: Latent height
+            lat_w: Latent width
+            last_frame: Optional last frame tensor
+            
+        Returns:
+            VAE encoded output with motion enhancement applied
+        """
+        h = lat_h * self.config["vae_stride"][1]
+        w = lat_w * self.config["vae_stride"][2]
+        msk = torch.ones(
+            1,
+            self.config["target_video_length"],
+            lat_h,
+            lat_w,
+            device=torch.device("cuda"),
+        )
+        if last_frame is not None:
+            msk[:, 1:-1] = 0
+        else:
+            msk[:, 1:] = 0
+
+        msk = torch.concat([torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]], dim=1)
+        msk = msk.view(1, msk.shape[1] // 4, 4, lat_h, lat_w)
+        msk = msk.transpose(1, 2)[0]
+
+        vae_offload = self.config.get("vae_cpu_offload", False)
+        
+        if self.config.get("lazy_load", False) or self.config.get("unload_modules", False):
+            self.vae_encoder = self.load_vae_encoder()
+        
+        # Move VAE encoder to GPU if offloaded
+        if vae_offload:
+            logger.debug("Loading VAE encoder to GPU...")
+            if hasattr(self.vae_encoder, 'encoder'):
+                self.vae_encoder.encoder = self.vae_encoder.encoder.cuda()
+            elif hasattr(self.vae_encoder, 'vae'):
+                self.vae_encoder.vae = self.vae_encoder.vae.cuda()
+
+        if last_frame is not None:
+            vae_input = torch.concat(
+                [
+                    torch.nn.functional.interpolate(first_frame.cpu(), size=(h, w), mode="bicubic").transpose(0, 1),
+                    torch.zeros(3, self.config["target_video_length"] - 2, h, w),
+                    torch.nn.functional.interpolate(last_frame.cpu(), size=(h, w), mode="bicubic").transpose(0, 1),
+                ],
+                dim=1,
+            ).cuda()
+        else:
+            vae_input = torch.concat(
+                [
+                    torch.nn.functional.interpolate(first_frame.cpu(), size=(h, w), mode="bicubic").transpose(0, 1),
+                    torch.zeros(3, self.config["target_video_length"] - 1, h, w),
+                ],
+                dim=1,
+            ).cuda()
+
+        # Standard VAE encoding
+        vae_encoder_out = self.vae_encoder.encode(vae_input.unsqueeze(0).to(GET_DTYPE()))
+        
+        # Apply motion enhancement if enabled
+        if self.motion_processor.enable and self.motion_processor.motion_amplitude > 1.0:
+            logger.debug("Applying motion amplitude enhancement to VAE latents...")
+            vae_encoder_out = self.motion_processor.apply_motion_enhancement(vae_encoder_out)
+
+        if self.config.get("lazy_load", False) or self.config.get("unload_modules", False):
+            del self.vae_encoder
+            torch.cuda.empty_cache()
+            gc.collect()
+        elif vae_offload:
+            # Offload VAE encoder back to CPU
+            logger.debug("Offloading VAE encoder to CPU...")
+            if hasattr(self.vae_encoder, 'encoder'):
+                self.vae_encoder.encoder = self.vae_encoder.encoder.cpu()
+            elif hasattr(self.vae_encoder, 'vae'):
+                self.vae_encoder.vae = self.vae_encoder.vae.cpu()
+            torch.cuda.empty_cache()
+            gc.collect()
+            logger.debug("✓ VAE encoder offloaded")
+            
+        vae_encoder_out = torch.concat([msk, vae_encoder_out]).to(GET_DTYPE())
+        return vae_encoder_out
+
+    def run_vae_decoder(self, latents):
+        """
+        Override VAE decoder to support VAE offloading during inference.
+        
+        This method handles VAE decoder offloading by:
+        1. Loading VAE decoder to GPU if it's on CPU (offloaded)
+        2. Running VAE decoding
+        3. Offloading VAE decoder back to CPU if configured
+        4. Clearing GPU cache to free memory
+        
+        Args:
+            latents: Latent tensor to decode
+            
+        Returns:
+            Decoded images
+        """
+        vae_offload = self.config.get("vae_cpu_offload", False)
+        
+        if self.config.get("lazy_load", False) or self.config.get("unload_modules", False):
+            self.vae_decoder = self.load_vae_decoder()
+        
+        # Move VAE decoder to GPU if offloaded
+        if vae_offload:
+            logger.info("Loading VAE decoder to GPU for latent decoding...")
+            if hasattr(self.vae_decoder, 'decoder'):
+                self.vae_decoder.decoder = self.vae_decoder.decoder.cuda()
+            elif hasattr(self.vae_decoder, 'vae'):
+                self.vae_decoder.vae = self.vae_decoder.vae.cuda()
+        
+        # Perform decoding
+        images = self.vae_decoder.decode(latents.to(GET_DTYPE()))
+        
+        if self.config.get("lazy_load", False) or self.config.get("unload_modules", False):
+            del self.vae_decoder
+            torch.cuda.empty_cache()
+            gc.collect()
+        elif vae_offload:
+            # Offload VAE decoder back to CPU
+            logger.info("Offloading VAE decoder to CPU...")
+            if hasattr(self.vae_decoder, 'decoder'):
+                self.vae_decoder.decoder = self.vae_decoder.decoder.cpu()
+            elif hasattr(self.vae_decoder, 'vae'):
+                self.vae_decoder.vae = self.vae_decoder.vae.cpu()
+            torch.cuda.empty_cache()
+            gc.collect()
+            logger.info("✓ VAE decoder offloaded, GPU memory freed")
+        
+        return images
+    
     def cleanup_after_inference(self):
         """Clean up GPU memory after inference for repeated generations.
         
@@ -537,6 +1063,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use prompt enhancer (default: False)",
     )
+    parser.add_argument(
+        "--motion_amplitude",
+        type=float,
+        default=1.15,
+        help="Motion amplitude scaling factor (1.0=no change, >1.0=more motion). "
+             "Recommended: 1.15-1.5 for fixing slow-motion in 4-step LoRAs",
+    )
+    parser.add_argument(
+        "--disable_motion_enhancement",
+        action="store_true",
+        help="Disable motion amplitude enhancement (default: enabled)",
+    )
     return parser
 
 
@@ -555,6 +1093,14 @@ def main() -> None:
     # Build configuration from arguments
     logger.info("Building configuration from arguments and config file...")
     config = set_config(args)
+    
+    # Add motion enhancement settings to config (command-line args override config file)
+    # If config already has these values, only override if command-line args differ from defaults
+    if "motion_amplitude" not in config or args.motion_amplitude != 1.15:
+        config["motion_amplitude"] = args.motion_amplitude
+    if "enable_motion_enhancement" not in config or args.disable_motion_enhancement:
+        config["enable_motion_enhancement"] = not args.disable_motion_enhancement
+    
     print_config(config)
 
     # Initialize the CUSTOM runner (Wan22MoeCustomRunner extends Wan22MoeDistillRunner)

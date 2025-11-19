@@ -74,6 +74,8 @@
     500,
     250
     ],
+    "motion_amplitude": 1.15,
+    "enable_motion_enhancement": true,
     "lora_configs": [
         {
             "name": "high_noise_model",
