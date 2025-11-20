@@ -648,9 +648,9 @@ class NAGModelWrapper:
             context_negative = self.negative_context.squeeze(0) if self.negative_context.dim() == 3 else self.negative_context
             
             # Debug logging
-            logger.debug(f"NAG cross_attn - context_positive shape: {context_positive.shape}")
-            logger.debug(f"NAG cross_attn - context_negative shape: {context_negative.shape}")
-            logger.debug(f"NAG cross_attn - task: {transformer_infer.task}, use_image_encoder: {transformer_infer.config.get('use_image_encoder')}")
+            # logger.debug(f"NAG cross_attn - context_positive shape: {context_positive.shape}")
+            # logger.debug(f"NAG cross_attn - context_negative shape: {context_negative.shape}")
+            # logger.debug(f"NAG cross_attn - task: {transformer_infer.task}, use_image_encoder: {transformer_infer.config.get('use_image_encoder')}")
 
             # Pad negative context if feature dimension mismatches (e.g. 5120 vs 4096)
             if context_positive.shape[-1] != context_negative.shape[-1]:
@@ -662,7 +662,7 @@ class NAGModelWrapper:
                         device=context_negative.device
                     )
                     context_negative = torch.cat([context_negative, padding], dim=-1)
-                    logger.debug(f"NAG padded negative context feature dim: {context_negative.shape}")
+                    # logger.debug(f"NAG padded negative context feature dim: {context_negative.shape}")
             
             # Handle image context if present
             # Only slice if task requires it AND sequence length supports it (must be > 257)
@@ -677,7 +677,7 @@ class NAGModelWrapper:
                 context_img = context_positive[:257]  # [257, D]
                 context_positive = context_positive[257:]  # [seq-257, D]
                 context_negative = context_negative[257:]  # [seq-257, D]
-                logger.debug(f"NAG cross_attn - after split - context_img: {context_img.shape}, context_positive: {context_positive.shape}, context_negative: {context_negative.shape}")
+                # logger.debug(f"NAG cross_attn - after split - context_img: {context_img.shape}, context_positive: {context_positive.shape}, context_negative: {context_negative.shape}")
             else:
                 context_img = None
             
@@ -840,7 +840,7 @@ class CustomWeightAsyncStreamManager(WeightAsyncStreamManager):
             offload_granularity (str): Granularity of offloading ("block" or "phase")
         """
         super().__init__(offload_granularity)
-        logger.debug(f"Initialized CustomWeightAsyncStreamManager (granularity={offload_granularity})")
+        # logger.debug(f"Initialized CustomWeightAsyncStreamManager (granularity={offload_granularity})")
     
     def swap_weights(self):
         """
@@ -1061,7 +1061,7 @@ class FrameInterpolator:
         if is_pytorch_format:
             # Convert [N, C, H, W] → [N, H, W, C] for RIFE
             video_tensor = video_tensor.permute(0, 2, 3, 1)
-            logger.debug(f"Converted PyTorch format to ComfyUI format: {video_tensor.shape}")
+            # logger.debug(f"Converted PyTorch format to ComfyUI format: {video_tensor.shape}")
         
         # Convert to float32 if needed (RIFE requires float32)
         original_dtype = video_tensor.dtype

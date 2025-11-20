@@ -101,6 +101,16 @@
                 "name": "low_noise_model",
                 "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise.safetensors",
                 "strength": 1.0
+            },
+            {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-high-oral-insertion-v1.0_normalized.safetensors",
+                "strength": 1.0
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-low-oral-insertion-v1.0_normalized.safetensors",
+                "strength": 1.0
             }
         ]
     },
