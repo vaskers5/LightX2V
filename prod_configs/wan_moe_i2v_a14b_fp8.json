@@ -85,11 +85,11 @@
             "scale": 1.0
         },
         "nag": {
-            "enabled": false,
+            "enabled": true,
             "scale": 1.5,
             "tau": 2.5,
             "alpha": 0.25,
-            "negative_prompt": ""
+            "negative_prompt": "bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards, flicker, flickering, jitter, text, text overlays, watermark, logo, heavy blur, motion blur, double faces, bad anatomy, bad proportions, noise, grainy, glitch"
         },
         "lora_configs": [
             {

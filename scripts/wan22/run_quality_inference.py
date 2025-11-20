@@ -576,7 +576,10 @@ class NAGModelWrapper:
     
     def enable_nag(self, nag_scale: float = 1.5, nag_tau: float = 2.5, nag_alpha: float = 0.25):
         """
-        Enable NAG by replacing cross-attention processors.
+        Enable NAG by monkey-patching the transformer infer's cross_attn method.
+        
+        This implementation works with WanTransformerWeights by intercepting the
+        cross-attention computation in the transformer inference class.
         
         Args:
             nag_scale: Guidance scale (>1.0 to enable)
@@ -589,52 +592,214 @@ class NAGModelWrapper:
         
         logger.info(f"Enabling NAG (scale={nag_scale}, tau={nag_tau}, alpha={nag_alpha})...")
         
-        # Store original processors
-        self.original_attn_processors = {}
+        # Store NAG parameters
+        self.nag_scale = nag_scale
+        self.nag_tau = nag_tau
+        self.nag_alpha = nag_alpha
         
-        # Get transformer weights module
-        if hasattr(self.model, 'transformer_weights'):
-            transformer = self.model.transformer_weights
-        else:
-            logger.error("Model doesn't have transformer_weights attribute")
+        # Get transformer infer instance
+        if not hasattr(self.model, 'transformer_infer'):
+            logger.error("Model doesn't have transformer_infer attribute")
             return
         
-        # Recursively find and replace attention processors
-        self._inject_nag_processors(transformer, nag_scale, nag_tau, nag_alpha)
+        transformer_infer = self.model.transformer_infer
+        
+        # Store original cross_attn method
+        self.original_infer_cross_attn = transformer_infer.infer_cross_attn
+        
+        # Replace with NAG-enhanced version
+        transformer_infer.infer_cross_attn = self._create_nag_cross_attn(
+            self.original_infer_cross_attn,
+            transformer_infer,
+            nag_scale,
+            nag_tau,
+            nag_alpha
+        )
         
         self.nag_enabled = True
-        logger.info(f"✓ NAG enabled successfully ({len(self.original_attn_processors)} processors replaced)")
+        logger.info(f"✓ NAG enabled successfully (cross_attn method patched)")
     
-    def _inject_nag_processors(self, module, nag_scale, nag_tau, nag_alpha, prefix=""):
+    def _create_nag_cross_attn(self, original_method, transformer_infer, nag_scale, nag_tau, nag_alpha):
         """
-        Recursively inject NAG processors into attention layers.
+        Create a NAG-enhanced version of the cross-attention method.
         
         Args:
-            module: Module to process
+            original_method: Original infer_cross_attn method
+            transformer_infer: Transformer infer instance
             nag_scale: NAG guidance scale
             nag_tau: NAG normalization threshold
             nag_alpha: NAG blending weight
-            prefix: Current module path prefix
+            
+        Returns:
+            NAG-enhanced cross-attention method
         """
-        for name, child in module.named_children():
-            full_name = f"{prefix}.{name}" if prefix else name
+        def nag_cross_attn(phase, x, context, y_out, gate_msa):
+            # Check if NAG should be applied
+            apply_guidance = nag_scale > 1 and hasattr(self, 'negative_context')
             
-            # Check if this is a cross-attention layer (attn2)
-            # Only apply NAG to cross-attention, not self-attention
-            if "attn2" in name.lower() or "cross_attn" in name.lower():
-                # Store original processor if it exists
-                if hasattr(child, 'processor'):
-                    self.original_attn_processors[full_name] = child.processor
-                    # Replace with NAG processor
-                    child.processor = NAGWanAttnProcessor(nag_scale, nag_tau, nag_alpha)
-                    logger.debug(f"Replaced processor at {full_name}")
+            if not apply_guidance:
+                # No NAG, use original method
+                return original_method(phase, x, context, y_out, gate_msa)
             
-            # Recurse into children
-            self._inject_nag_processors(child, nag_scale, nag_tau, nag_alpha, full_name)
+            # Get positive and negative contexts
+            # Note: context arrives as 2D [seq_len, hidden_dim]
+            # but negative_context is stored as 3D [1, seq_len, hidden_dim]
+            context_positive = context
+            context_negative = self.negative_context.squeeze(0) if self.negative_context.dim() == 3 else self.negative_context
+            
+            # Debug logging
+            logger.debug(f"NAG cross_attn - context_positive shape: {context_positive.shape}")
+            logger.debug(f"NAG cross_attn - context_negative shape: {context_negative.shape}")
+            logger.debug(f"NAG cross_attn - task: {transformer_infer.task}, use_image_encoder: {transformer_infer.config.get('use_image_encoder')}")
+
+            # Pad negative context if feature dimension mismatches (e.g. 5120 vs 4096)
+            if context_positive.shape[-1] != context_negative.shape[-1]:
+                diff = context_positive.shape[-1] - context_negative.shape[-1]
+                if diff > 0:
+                    padding = torch.zeros(
+                        *context_negative.shape[:-1], diff,
+                        dtype=context_negative.dtype,
+                        device=context_negative.device
+                    )
+                    context_negative = torch.cat([context_negative, padding], dim=-1)
+                    logger.debug(f"NAG padded negative context feature dim: {context_negative.shape}")
+            
+            # Handle image context if present
+            # Only slice if task requires it AND sequence length supports it (must be > 257)
+            should_slice = (
+                transformer_infer.task in ["i2v", "flf2v", "animate", "s2v"] and 
+                transformer_infer.config.get("use_image_encoder", True) and
+                context_positive.shape[0] > 257
+            )
+            
+            if should_slice:
+                # Slice along first dimension (sequence)
+                context_img = context_positive[:257]  # [257, D]
+                context_positive = context_positive[257:]  # [seq-257, D]
+                context_negative = context_negative[257:]  # [seq-257, D]
+                logger.debug(f"NAG cross_attn - after split - context_img: {context_img.shape}, context_positive: {context_positive.shape}, context_negative: {context_negative.shape}")
+            else:
+                context_img = None
+            
+            # Compute positive attention
+            attn_out_positive = self._compute_cross_attn(
+                transformer_infer, phase, x, context_positive, context_img, y_out, gate_msa
+            )
+            
+            # Compute negative attention
+            attn_out_negative = self._compute_cross_attn(
+                transformer_infer, phase, x, context_negative, None, y_out, gate_msa
+            )
+            
+            # Apply NAG guidance
+            attn_guided = (
+                attn_out_positive * nag_scale -
+                attn_out_negative * (nag_scale - 1)
+            )
+            
+            # Normalize guidance to prevent over-saturation
+            norm_positive = torch.norm(
+                attn_out_positive, p=1, dim=-1, keepdim=True
+            ).expand(*attn_out_positive.shape)
+            norm_guidance = torch.norm(
+                attn_guided, p=1, dim=-1, keepdim=True
+            ).expand(*attn_guided.shape)
+            
+            # Compute scaling ratio
+            scale = norm_guidance / (norm_positive + 1e-7)
+            scale = torch.nan_to_num(scale, 10)
+            
+            # Apply tau threshold: if scale > tau, normalize guidance
+            mask = scale > nag_tau
+            attn_guided[mask] = (
+                attn_guided[mask] / (norm_guidance[mask] + 1e-7) *
+                norm_positive[mask] * nag_tau
+            )
+            
+            # Blend normalized guidance with positive attention
+            attn_out = (
+                attn_guided * nag_alpha +
+                attn_out_positive * (1 - nag_alpha)
+            )
+            
+            # Calculate updated x to return (same logic as in _compute_cross_attn)
+            if transformer_infer.sensitive_layer_dtype != transformer_infer.infer_dtype:
+                x_updated = x.to(transformer_infer.sensitive_layer_dtype) + y_out.to(transformer_infer.sensitive_layer_dtype) * gate_msa.squeeze()
+            else:
+                x_updated = x + y_out * gate_msa.squeeze()
+            
+            return x_updated, attn_out
+        
+        return nag_cross_attn
+    
+    def _compute_cross_attn(self, transformer_infer, phase, x, context, context_img, y_out, gate_msa):
+        """
+        Compute cross-attention output for a given context.
+        
+        This is a helper method that replicates the core cross-attention logic.
+        """
+        if transformer_infer.sensitive_layer_dtype != transformer_infer.infer_dtype:
+            x_norm = x.to(transformer_infer.sensitive_layer_dtype) + y_out.to(transformer_infer.sensitive_layer_dtype) * gate_msa.squeeze()
+        else:
+            x_norm = x + y_out * gate_msa.squeeze()
+        
+        norm3_out = phase.norm3.apply(x_norm)
+        
+        if transformer_infer.sensitive_layer_dtype != transformer_infer.infer_dtype:
+            context = context.to(transformer_infer.infer_dtype)
+            if context_img is not None:
+                context_img = context_img.to(transformer_infer.infer_dtype)
+        
+        n, d = transformer_infer.num_heads, transformer_infer.head_dim
+        
+        q = phase.cross_attn_norm_q.apply(phase.cross_attn_q.apply(norm3_out)).view(-1, n, d)
+        k = phase.cross_attn_norm_k.apply(phase.cross_attn_k.apply(context)).view(-1, n, d)
+        v = phase.cross_attn_v.apply(context).view(-1, n, d)
+        
+        cu_seqlens_q, cu_seqlens_k = transformer_infer._calculate_q_k_len(
+            q,
+            k_lens=torch.tensor([k.size(0)], dtype=torch.int32, device=k.device),
+        )
+        
+        attn_out = phase.cross_attn_1.apply(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_k,
+            max_seqlen_q=q.size(0),
+            max_seqlen_kv=k.size(0),
+            model_cls=transformer_infer.config["model_cls"],
+        )
+        
+        # Add image attention if present
+        if context_img is not None:
+            k_img = phase.cross_attn_norm_k_img.apply(phase.cross_attn_k_img.apply(context_img)).view(-1, n, d)
+            v_img = phase.cross_attn_v_img.apply(context_img).view(-1, n, d)
+            
+            cu_seqlens_q, cu_seqlens_k = transformer_infer._calculate_q_k_len(
+                q,
+                k_lens=torch.tensor([k_img.size(0)], dtype=torch.int32, device=k.device),
+            )
+            
+            img_attn_out = phase.cross_attn_2.apply(
+                q=q,
+                k=k_img,
+                v=v_img,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_k,
+                max_seqlen_q=q.size(0),
+                max_seqlen_kv=k_img.size(0),
+                model_cls=transformer_infer.config["model_cls"],
+            )
+            attn_out = attn_out + img_attn_out
+        
+        y = phase.cross_attn_o.apply(attn_out)
+        return y
     
     def disable_nag(self):
         """
-        Disable NAG by restoring original attention processors.
+        Disable NAG by restoring original cross-attention method.
         """
         if not self.nag_enabled:
             logger.warning("NAG not enabled, skipping")
@@ -642,33 +807,13 @@ class NAGModelWrapper:
         
         logger.info("Disabling NAG...")
         
-        # Restore original processors
-        if hasattr(self.model, 'transformer_weights'):
-            transformer = self.model.transformer_weights
-            self._restore_processors(transformer)
+        # Restore original method
+        if hasattr(self.model, 'transformer_infer') and hasattr(self, 'original_infer_cross_attn'):
+            self.model.transformer_infer.infer_cross_attn = self.original_infer_cross_attn
+            delattr(self, 'original_infer_cross_attn')
         
-        self.original_attn_processors = None
         self.nag_enabled = False
         logger.info("✓ NAG disabled")
-    
-    def _restore_processors(self, module, prefix=""):
-        """
-        Recursively restore original attention processors.
-        
-        Args:
-            module: Module to process
-            prefix: Current module path prefix
-        """
-        for name, child in module.named_children():
-            full_name = f"{prefix}.{name}" if prefix else name
-            
-            # Restore processor if we saved it
-            if full_name in self.original_attn_processors:
-                child.processor = self.original_attn_processors[full_name]
-                logger.debug(f"Restored processor at {full_name}")
-            
-            # Recurse into children
-            self._restore_processors(child, full_name)
     
     def __getattr__(self, name):
         """Forward all other attributes to the wrapped model."""
@@ -1589,15 +1734,15 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
 
     def run_text_encoder(self, input_info):
         """
-        Override text encoder to support T5 offloading and NAG double-batch encoding.
+        Override text encoder to support T5 offloading and NAG negative prompt encoding.
         
         This method handles:
         1. T5 encoder offloading (loading to GPU → encoding → offloading to CPU)
-        2. NAG double-batch encoding (positive + negative prompts concatenated)
+        2. NAG negative prompt encoding (stored separately, not concatenated)
         3. Memory cleanup after text encoding
         
-        For NAG: Encodes both positive and negative prompts, then concatenates them
-        into a single batch [positive, negative] for NAG guidance during inference.
+        For NAG: Encodes both positive and negative prompts separately and stores
+        the negative embedding for later use in cross-attention computation.
         
         Args:
             input_info: Input information containing prompts
@@ -1618,12 +1763,12 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
             elif hasattr(self.text_encoders[0], 'text_encoder'):
                 self.text_encoders[0].text_encoder = self.text_encoders[0].text_encoder.cuda()
         
-        # Call parent implementation for actual text encoding
+        # Call parent implementation for actual text encoding (positive prompt)
         result = super().run_text_encoder(input_info)
         
-        # For NAG: Create double-batch encoding [positive, negative]
+        # For NAG: Encode negative prompt separately and store it
         if nag_enabled and self.nag_wrapper is not None:
-            logger.info("Creating NAG double-batch text encoding...")
+            logger.info("Encoding NAG negative prompt...")
             
             # Get negative prompt (use config or input_info)
             nag_negative_prompt = self.nag_config.get("negative_prompt", "")
@@ -1642,13 +1787,32 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
             # Encode negative prompt
             negative_result = super().run_text_encoder(negative_input_info)
             
-            # Concatenate positive and negative embeddings
-            # result['context'] shape: [B, N, D] -> [2B, N, D] (positive + negative)
-            if 'context' in result:
-                positive_context = result['context']
-                negative_context = negative_result['context']
-                result['context'] = torch.cat([positive_context, negative_context], dim=0)
-                logger.info(f"NAG double-batch created: {result['context'].shape}")
+            # Store negative context in the NAG wrapper for later use
+            if 'context' in negative_result:
+                # For I2V tasks with image encoder, positive context has [image_features + text_features]
+                # but negative context only has [text_features]. We need to pad with zeros for image features.
+                negative_ctx = negative_result['context']
+                
+                if self.config["task"] in ["i2v", "flf2v", "animate", "s2v"] and self.config.get("use_image_encoder", True):
+                    # Positive context format: [B, 257+512, D] (image + text)
+                    # Negative context format: [B, 512, D] (text only)
+                    # Pad negative context with zeros for missing image features
+                    batch_size, text_len, hidden_dim = negative_ctx.shape
+                    image_len = 257  # Standard CLIP image feature length
+                    
+                    # Create zero padding for image features
+                    zero_padding = torch.zeros(
+                        batch_size, image_len, hidden_dim,
+                        dtype=negative_ctx.dtype,
+                        device=negative_ctx.device
+                    )
+                    
+                    # Concatenate: [zero_image_features, text_features]
+                    negative_ctx = torch.cat([zero_padding, negative_ctx], dim=1)
+                    logger.info(f"NAG negative context padded with {image_len} zero image features")
+                
+                self.nag_wrapper.negative_context = negative_ctx
+                logger.info(f"NAG negative context stored: {self.nag_wrapper.negative_context.shape}")
             
             del negative_result
         
