@@ -1,91 +1,103 @@
 {
-    "preset": "FP8 Fast (Quality + Speed)",
-    "model_cls": "wan2.2_moe_distill",
-    "task": "i2v",
-    "scheduler_type": "EulerScheduler",
-    "sf_model_path": null,
-    "high_noise_quantized_ckpt": "models/wan2.2_models/distill_models/wan2.2_i2v_A14b_high_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
-    "low_noise_quantized_ckpt": "models/wan2.2_models/distill_models/wan2.2_i2v_A14b_low_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
-    "vae_path": "models/wan2.2_models/vae/Wan2.1_VAE.pth",
-    "t5_original_ckpt": "models/wan2.2_models/encoders/models_t5_umt5-xxl-enc-bf16_fully_uncensored.safetensors",
-    "clip_original_ckpt": "models/wan2.2_models/encoders/models_clip_open-clip-xlm-roberta-large-vit-huge-14.safetensors",
-    "_class_name": "WanModel",
-    "_diffusers_version": "0.33.0",
-    "dim": 5120,
-    "eps": 1e-06,
-    "ffn_dim": 13824,
-    "freq_dim": 256,
-    "in_dim": 36,
-    "model_type": "i2v",
-    "num_heads": 40,
-    "num_layers": 40,
-    "out_dim": 16,
-    "text_len": 512,
-    "do_mm_calib": false,
-    "cpu_offload": false,
-    "max_area": false,
-    "vae_stride": [
-        4,
-        8,
-        8
-    ],
-    "patch_size": [
-        1,
-        2,
-        2
-    ],
-    "use_ret_steps": false,
-    "use_bfloat16": true,
-    "use_prompt_enhancer": false,
-    "parallel": false,
-    "seq_parallel": false,
-    "cfg_parallel": false,
-    "use_image_encoder": false,
-    "attnmap_frame_num": 81,
-    "boundary": 0.5,
-    "target_video_length": 81,
-    "target_height": 1280,
-    "target_width": 720,
-    "infer_steps": 4,
-    "self_attn_1_type": "sage_attn2",
-    "cross_attn_1_type": "sage_attn2",
-    "cross_attn_2_type": "sage_attn2",
-    "sample_guide_scale": [1.0, 1.0],
-    "sample_shift": 5.0,
-    "enable_cfg": true,
-    "offload_granularity": "phase",
-    "t5_cpu_offload": true,
-    "vae_cpu_offload": true,
-    "boundary_step_index": 2,
-    "denoising_step_list_high": [
-        1000,
-        750
-    ],
-    "denoising_step_list_low": [
-        500,
-        250
-    ],
-    "denoising_step_list": [
-        1000,
-        750,
-        500,
-        250
-    ],
-    "dit_quantized": true,
-    "dit_quant_scheme": "fp8-sgl",
-    "t5_quantized": false,
-    "motion_amplitude": 1.15,
-    "enable_motion_enhancement": true,
-    "lora_configs": [
-        {
-            "name": "high_noise_model",
-            "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise.safetensors",
-            "strength": 1.0
+    "config": {
+        "preset": "FP8 Fast (Quality + Speed)",
+        "model_cls": "wan2.2_moe_distill",
+        "task": "i2v",
+        "scheduler_type": "EulerScheduler",
+        "sf_model_path": null,
+        "high_noise_quantized_ckpt": "models/wan2.2_models/distill_models/wan2.2_i2v_A14b_high_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
+        "low_noise_quantized_ckpt": "models/wan2.2_models/distill_models/wan2.2_i2v_A14b_low_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
+        "vae_path": "models/wan2.2_models/vae/Wan2.1_VAE.pth",
+        "t5_original_ckpt": "models/wan2.2_models/encoders/models_t5_umt5-xxl-enc-bf16_fully_uncensored.safetensors",
+        "clip_original_ckpt": "models/wan2.2_models/encoders/models_clip_open-clip-xlm-roberta-large-vit-huge-14.safetensors",
+        "_class_name": "WanModel",
+        "_diffusers_version": "0.33.0",
+        "dim": 5120,
+        "eps": 1e-06,
+        "ffn_dim": 13824,
+        "freq_dim": 256,
+        "in_dim": 36,
+        "model_type": "i2v",
+        "num_heads": 40,
+        "num_layers": 40,
+        "out_dim": 16,
+        "text_len": 512,
+        "do_mm_calib": false,
+        "cpu_offload": false,
+        "max_area": false,
+        "vae_stride": [
+            4,
+            8,
+            8
+        ],
+        "patch_size": [
+            1,
+            2,
+            2
+        ],
+        "use_ret_steps": false,
+        "use_bfloat16": true,
+        "use_prompt_enhancer": false,
+        "parallel": false,
+        "seq_parallel": false,
+        "cfg_parallel": false,
+        "use_image_encoder": false,
+        "attnmap_frame_num": 81,
+        "boundary": 0.5,
+        "target_video_length": 81,
+        "target_height": 1280,
+        "target_width": 720,
+        "infer_steps": 4,
+        "self_attn_1_type": "sage_attn2",
+        "cross_attn_1_type": "sage_attn2",
+        "cross_attn_2_type": "sage_attn2",
+        "sample_guide_scale": [1.0, 1.0],
+        "sample_shift": 5.0,
+        "enable_cfg": true,
+        "offload_granularity": "phase",
+        "t5_cpu_offload": true,
+        "vae_cpu_offload": true,
+        "boundary_step_index": 2,
+        "denoising_step_list_high": [
+            1000,
+            750
+        ],
+        "denoising_step_list_low": [
+            500,
+            250
+        ],
+        "denoising_step_list": [
+            1000,
+            750,
+            500,
+            250
+        ],
+        "dit_quantized": true,
+        "dit_quant_scheme": "fp8-sgl",
+        "t5_quantized": false,
+        "motion_amplitude": 1.15,
+        "enable_motion_enhancement": true,
+        "frame_interpolation": {
+            "enabled": true,
+            "model_path": "models/rife/RIFEv4.26_0921",
+            "source_fps": 8.0,
+            "target_fps": 24.0,
+            "scale": 1.0
         },
-        {
-            "name": "low_noise_model",
-            "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise.safetensors",
-            "strength": 1.0
-        }
-    ]
+        "lora_configs": [
+            {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise.safetensors",
+                "strength": 1.0
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise.safetensors",
+                "strength": 1.0
+            }
+        ]
+    },
+    "input_info": {
+        "negative_prompt": "bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards, flicker, flickering, jitter, text, text overlays, watermark, logo, heavy blur, motion blur, double faces, bad anatomy, bad proportions, noise, grainy, glitch"
+    }
 }

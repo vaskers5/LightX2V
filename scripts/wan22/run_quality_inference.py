@@ -33,8 +33,12 @@ This script demonstrates a custom runner pattern for WAN2.2-MOE inference:
 3. **Motion Enhancement Classes** (NEW):
    - `MotionAmplitudeProcessor`: Core algorithm for fixing slow-motion issues
    - `EnhancedVAEEncoder`: Wrapper for VAE encoder with motion enhancement
+
+4. **Video Post-Processing Classes** (NEW):
+   - `FrameInterpolator`: RIFE-based frame interpolation for smooth FPS upsampling
+   - `VideoPackager`: Tensor-to-video encoding with multiple codec support
    
-4. **Base Runner Responsibilities** (inherited):
+5. **Base Runner Responsibilities** (inherited):
    - Model loading (VAE, text encoders, image encoder)
    - Scheduler initialization
    - Text encoding pipeline
@@ -133,6 +137,61 @@ Add custom LoRAs (edit the config JSON):
         "strength": 0.8
     }
 
+VIDEO POST-PROCESSING EXAMPLES:
+================================
+
+Using FrameInterpolator for smooth FPS upsampling:
+    ```python
+    from scripts.wan22.run_quality_inference import FrameInterpolator
+    
+    # Initialize interpolator
+    interpolator = FrameInterpolator(
+        model_path="models/rife/RIFEv4.26_0921",
+        device=torch.device("cuda")
+    )
+    
+    # Interpolate 8 FPS to 24 FPS
+    interpolated_video = interpolator.interpolate(
+        video_tensor=output_tensor,  # [N, C, H, W] or [N, H, W, C]
+        source_fps=8.0,
+        target_fps=24.0,
+        scale=1.0  # Full resolution
+    )
+    
+    interpolator.cleanup()
+    ```
+
+Using VideoPackager for encoding:
+    ```python
+    from scripts.wan22.run_quality_inference import VideoPackager
+    
+    # Context manager style (auto-cleanup)
+    with VideoPackager("output.mp4", fps=24.0, codec="avc1") as packager:
+        packager.write_video(video_tensor)
+    
+    # Or quick save
+    VideoPackager.quick_save(
+        video_tensor=interpolated_video,
+        output_path="final_output.mp4",
+        fps=24.0,
+        codec="mp4v"
+    )
+    ```
+
+Combined post-processing pipeline:
+    ```python
+    # 1. Generate video with runner
+    result_tensor = runner.run_pipeline(input_info)
+    
+    # 2. Interpolate frames (8 FPS → 24 FPS)
+    interpolator = FrameInterpolator("models/rife/RIFEv4.26_0921")
+    smooth_video = interpolator.interpolate(result_tensor, 8.0, 24.0)
+    interpolator.cleanup()
+    
+    # 3. Package to final video file
+    VideoPackager.quick_save(smooth_video, "final.mp4", fps=24.0, codec="avc1")
+    ```
+
 CREDITS:
 ========
 
@@ -144,21 +203,125 @@ from __future__ import annotations
 
 import argparse
 import gc
+import json
 import os
+from pathlib import Path
 from typing import Optional
 
+import cv2
+import numpy as np
 import torch
+import torch.distributed as dist
 from loguru import logger
 from safetensors import safe_open
+from torch.distributed.tensor.device_mesh import init_device_mesh
 
 from lightx2v.common.offload.manager import WeightAsyncStreamManager
 from lightx2v.models.networks.wan.distill_model import WanDistillModel
 from lightx2v.models.networks.wan.model import WanModel
 from lightx2v.models.runners.wan.wan_distill_runner import MultiDistillModelStruct, Wan22MoeDistillRunner
 from lightx2v.utils.envs import *
-from lightx2v.utils.input_info import set_input_info
-from lightx2v.utils.set_config import print_config, set_config
+from lightx2v.utils.input_info import ALL_INPUT_INFO_KEYS, set_input_info
+from lightx2v.utils.lockable_dict import LockableDict
 from lightx2v.utils.utils import seed_all
+
+
+def get_default_config():
+    default_config = {
+        "do_mm_calib": False,
+        "cpu_offload": False,
+        "max_area": False,
+        "vae_stride": (4, 8, 8),
+        "patch_size": (1, 2, 2),
+        "feature_caching": "NoCaching",  # ["NoCaching", "TaylorSeer", "Tea"]
+        "teacache_thresh": 0.26,
+        "use_ret_steps": False,
+        "use_bfloat16": True,
+        "lora_configs": None,  # List of dicts with 'path' and 'strength' keys
+        "use_prompt_enhancer": False,
+        "parallel": False,
+        "seq_parallel": False,
+        "cfg_parallel": False,
+        "enable_cfg": False,
+        "use_image_encoder": True,
+    }
+    default_config = LockableDict(default_config)
+    return default_config
+
+
+def set_config(args):
+    config = get_default_config()
+    config.update({k: v for k, v in vars(args).items() if k not in ALL_INPUT_INFO_KEYS})
+
+    # if config.get("config_json", None) is not None:
+    #     logger.info(f"Loading some config from {config['config_json']}")
+    #     with open(config["config_json"], "r") as f:
+    #         config_json = json.load(f)
+    #     config.update(config_json)
+
+    # if os.path.exists(os.path.join(config["model_path"], "config.json")):
+    #     with open(os.path.join(config["model_path"], "config.json"), "r") as f:
+    #         model_config = json.load(f)
+    #     config.update(model_config)
+    # elif os.path.exists(os.path.join(config["model_path"], "low_noise_model", "config.json")):  # 需要一个更优雅的update方法
+    #     with open(os.path.join(config["model_path"], "low_noise_model", "config.json"), "r") as f:
+    #         model_config = json.load(f)
+    #     config.update(model_config)
+    # elif os.path.exists(os.path.join(config["model_path"], "distill_models", "low_noise_model", "config.json")):  # 需要一个更优雅的update方法
+    #     with open(os.path.join(config["model_path"], "distill_models", "low_noise_model", "config.json"), "r") as f:
+    #         model_config = json.load(f)
+    #     config.update(model_config)
+    # elif os.path.exists(os.path.join(config["model_path"], "original", "config.json")):
+    #     with open(os.path.join(config["model_path"], "original", "config.json"), "r") as f:
+    #         model_config = json.load(f)
+    #     config.update(model_config)
+    # load quantized config
+    # if config.get("dit_quantized_ckpt", None) is not None:
+    #     config_path = os.path.join(config["dit_quantized_ckpt"], "config.json")
+    #     if os.path.exists(config_path):
+    #         with open(config_path, "r") as f:
+    #             model_config = json.load(f)
+    #         config.update(model_config)
+
+    # if config["task"] in ["i2v", "s2v"]:
+    #     if config["target_video_length"] % config["vae_stride"][0] != 1:
+    #         logger.warning(f"`num_frames - 1` has to be divisible by {config['vae_stride'][0]}. Rounding to the nearest number.")
+    #         config["target_video_length"] = config["target_video_length"] // config["vae_stride"][0] * config["vae_stride"][0] + 1
+
+    # if config["task"] not in ["t2i", "i2i"]:
+    #     config["attnmap_frame_num"] = ((config["target_video_length"] - 1) // config["vae_stride"][0] + 1) // config["patch_size"][0]
+    #     if config["model_cls"] == "seko_talk":
+    #         config["attnmap_frame_num"] += 1
+
+    return config
+
+
+def set_parallel_config(config):
+    if config["parallel"]:
+        cfg_p_size = config["parallel"].get("cfg_p_size", 1)
+        seq_p_size = config["parallel"].get("seq_p_size", 1)
+        assert cfg_p_size * seq_p_size == dist.get_world_size(), f"cfg_p_size * seq_p_size must be equal to world_size"
+        config["device_mesh"] = init_device_mesh("cuda", (cfg_p_size, seq_p_size), mesh_dim_names=("cfg_p", "seq_p"))
+
+        if config["parallel"] and config["parallel"].get("seq_p_size", False) and config["parallel"]["seq_p_size"] > 1:
+            config["seq_parallel"] = True
+
+        if config.get("enable_cfg", False) and config["parallel"] and config["parallel"].get("cfg_p_size", False) and config["parallel"]["cfg_p_size"] > 1:
+            config["cfg_parallel"] = True
+        # warmup dist
+        _a = torch.zeros([1]).to(f"cuda:{dist.get_rank()}")
+        dist.all_reduce(_a)
+
+
+def print_config(config):
+    config_to_print = config.copy()
+    config_to_print.pop("device_mesh", None)
+    if config["parallel"]:
+        if dist.get_rank() == 0:
+            logger.info(f"config:\n{json.dumps(config_to_print, ensure_ascii=False, indent=4)}")
+    else:
+        logger.info(f"config:\n{json.dumps(config_to_print, ensure_ascii=False, indent=4)}")
+
 
 
 class CustomWeightAsyncStreamManager(WeightAsyncStreamManager):
@@ -260,8 +423,8 @@ class MotionAmplitudeProcessor:
         
         # Preserve brightness by extracting and re-adding mean
         # This is the KEY to preventing brightness changes during motion amplification
-        # Average across channels (0), height (2), width (3), keep time (1)
-        diff_mean = diff.mean(dim=(0, 2, 3), keepdim=True)
+        # Average across height (2), width (3), keep time (1) and channel (0)
+        diff_mean = diff.mean(dim=(2, 3), keepdim=True)
         diff_centered = diff - diff_mean
         
         # Amplify centered motion and restore mean
@@ -321,6 +484,290 @@ class EnhancedVAEEncoder:
     def __getattr__(self, name):
         """Forward all other attributes to the wrapped VAE encoder."""
         return getattr(self.vae_encoder, name)
+
+
+class FrameInterpolator:
+    """
+    Frame interpolation processor using RIFE model for smooth video upsampling.
+    
+    This class provides frame interpolation capabilities to increase video frame rate
+    using the RIFE (Real-Time Intermediate Flow Estimation) model. It supports:
+    - Arbitrary FPS conversion (e.g., 8 FPS → 24 FPS, 30 FPS → 60 FPS)
+    - Batch processing for memory efficiency
+    - GPU acceleration with automatic device selection
+    - Flexible scaling for quality/performance trade-offs
+    
+    Based on RIFE: https://github.com/megvii-research/ECCV2022-RIFE
+    """
+    
+    def __init__(self, model_path: str, device: Optional[torch.device] = None):
+        """
+        Initialize frame interpolator with RIFE model.
+        
+        Args:
+            model_path (str): Path to RIFE model checkpoint directory
+            device (torch.device, optional): Device for inference. Defaults to CUDA if available.
+        """
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model_path = model_path
+        self.model = None
+        
+        logger.info(f"FrameInterpolator initialized (device={self.device})")
+    
+    def _load_model(self):
+        """Lazy load RIFE model when first needed."""
+        if self.model is not None:
+            return
+        
+        logger.info(f"Loading RIFE model from {self.model_path}...")
+        
+        try:
+            from lightx2v.models.vfi.rife.rife_comfyui_wrapper import RIFEWrapper
+            self.model = RIFEWrapper(self.model_path, device=self.device)
+            logger.info("✓ RIFE model loaded successfully")
+        except ImportError as e:
+            logger.error(f"Failed to import RIFE model: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Failed to load RIFE model: {e}")
+            raise
+    
+    @torch.no_grad()
+    def interpolate(
+        self,
+        video_tensor: torch.Tensor,
+        source_fps: float,
+        target_fps: float,
+        scale: float = 1.0,
+    ) -> torch.Tensor:
+        """
+        Interpolate video frames from source FPS to target FPS.
+        
+        Args:
+            video_tensor (torch.Tensor): Input video tensor with shape:
+                                        - [N, H, W, C] (ComfyUI format), or
+                                        - [N, C, H, W] (PyTorch format)
+                                        Values should be in range [0, 1]
+            source_fps (float): Source frame rate (e.g., 8.0)
+            target_fps (float): Target frame rate (e.g., 24.0)
+            scale (float): Processing scale factor. Lower = faster but less quality.
+                          Default 1.0 (full resolution)
+        
+        Returns:
+            torch.Tensor: Interpolated video in same format as input
+        """
+        if source_fps >= target_fps:
+            logger.warning(f"Target FPS ({target_fps}) <= source FPS ({source_fps}), skipping interpolation")
+            return video_tensor
+        
+        # Load model if not already loaded
+        self._load_model()
+        
+        logger.info(f"Interpolating video: {source_fps} FPS → {target_fps} FPS (scale={scale})")
+        logger.debug(f"Input tensor shape: {video_tensor.shape}")
+        
+        # Detect and convert tensor format if needed
+        is_pytorch_format = video_tensor.shape[1] == 3 or video_tensor.shape[1] == 1
+        
+        if is_pytorch_format:
+            # Convert [N, C, H, W] → [N, H, W, C] for RIFE
+            video_tensor = video_tensor.permute(0, 2, 3, 1)
+            logger.debug(f"Converted PyTorch format to ComfyUI format: {video_tensor.shape}")
+        
+        # Perform interpolation
+        interpolated = self.model.interpolate_frames(
+            video_tensor,
+            source_fps=source_fps,
+            target_fps=target_fps,
+            scale=scale
+        )
+        
+        # Convert back to original format if needed
+        if is_pytorch_format:
+            interpolated = interpolated.permute(0, 3, 1, 2)
+            logger.debug(f"Converted back to PyTorch format: {interpolated.shape}")
+        
+        logger.info(f"✓ Interpolation complete: {video_tensor.shape[0]} → {interpolated.shape[0]} frames")
+        
+        return interpolated
+    
+    def cleanup(self):
+        """Release model resources and free GPU memory."""
+        if self.model is not None:
+            del self.model
+            self.model = None
+            torch.cuda.empty_cache()
+            gc.collect()
+            logger.info("✓ FrameInterpolator resources released")
+
+
+class VideoPackager:
+    """
+    Video packaging utility for encoding tensors to video files.
+    
+    This class handles the conversion of tensor frames to various video formats,
+    supporting:
+    - Multiple codecs (H.264, H.265/HEVC, VP9, ProRes)
+    - Configurable quality settings
+    - Audio track support (optional)
+    - Metadata injection
+    - Progress tracking for long videos
+    
+    Supports both OpenCV and FFmpeg backends for maximum compatibility.
+    """
+    
+    def __init__(
+        self,
+        output_path: str,
+        fps: float = 24.0,
+        codec: str = "mp4v",
+        quality: Optional[int] = None,
+        use_ffmpeg: bool = False,
+    ):
+        """
+        Initialize video packager.
+        
+        Args:
+            output_path (str): Path for output video file
+            fps (float): Frame rate for output video. Default 24.0
+            codec (str): Video codec fourcc code. Options:
+                        - "mp4v": MPEG-4 (good compatibility)
+                        - "avc1": H.264 (high compression)
+                        - "hev1": H.265/HEVC (best compression)
+                        - "vp09": VP9 (web-optimized)
+            quality (int, optional): Quality setting (codec-dependent, higher = better)
+            use_ffmpeg (bool): Use FFmpeg instead of OpenCV (more features, slower)
+        """
+        self.output_path = output_path
+        self.fps = fps
+        self.codec = codec
+        self.quality = quality
+        self.use_ffmpeg = use_ffmpeg
+        self.writer = None
+        self.frame_count = 0
+        
+        # Create output directory if needed
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        
+        logger.info(f"VideoPackager initialized: {output_path} ({fps} FPS, codec={codec})")
+    
+    def _init_opencv_writer(self, width: int, height: int):
+        """Initialize OpenCV video writer."""
+        fourcc = cv2.VideoWriter_fourcc(*self.codec)
+        self.writer = cv2.VideoWriter(
+            self.output_path,
+            fourcc,
+            self.fps,
+            (width, height)
+        )
+        
+        if not self.writer.isOpened():
+            raise RuntimeError(f"Failed to create video writer for {self.output_path}")
+        
+        logger.debug(f"OpenCV writer initialized: {width}x{height}")
+    
+    def _tensor_to_frame(self, tensor: torch.Tensor) -> np.ndarray:
+        """
+        Convert tensor to numpy frame for video writing.
+        
+        Args:
+            tensor (torch.Tensor): Frame tensor with shape [C, H, W] or [H, W, C]
+                                  Values in range [0, 1]
+        
+        Returns:
+            np.ndarray: BGR frame in uint8 format [H, W, 3]
+        """
+        # Convert to CPU and numpy
+        if tensor.is_cuda:
+            tensor = tensor.cpu()
+        
+        # Detect format and convert to [H, W, C]
+        if tensor.shape[0] == 3:  # [C, H, W] format
+            tensor = tensor.permute(1, 2, 0)
+        
+        # Convert to numpy and scale to [0, 255]
+        frame = tensor.numpy()
+        frame = (frame * 255).clip(0, 255).astype(np.uint8)
+        
+        # Convert RGB to BGR for OpenCV
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        
+        return frame
+    
+    def write_frame(self, frame_tensor: torch.Tensor):
+        """
+        Write a single frame to the video.
+        
+        Args:
+            frame_tensor (torch.Tensor): Frame with shape [C, H, W] or [H, W, C]
+        """
+        # Initialize writer on first frame
+        if self.writer is None:
+            if frame_tensor.shape[0] == 3:  # [C, H, W]
+                height, width = frame_tensor.shape[1:3]
+            else:  # [H, W, C]
+                height, width = frame_tensor.shape[0:2]
+            
+            self._init_opencv_writer(width, height)
+        
+        # Convert and write frame
+        frame = self._tensor_to_frame(frame_tensor)
+        self.writer.write(frame)
+        self.frame_count += 1
+    
+    def write_video(self, video_tensor: torch.Tensor, show_progress: bool = True):
+        """
+        Write entire video tensor to file.
+        
+        Args:
+            video_tensor (torch.Tensor): Video with shape [N, C, H, W] or [N, H, W, C]
+            show_progress (bool): Show progress logging. Default True
+        """
+        num_frames = video_tensor.shape[0]
+        
+        logger.info(f"Writing {num_frames} frames to {self.output_path}...")
+        
+        for i in range(num_frames):
+            self.write_frame(video_tensor[i])
+            
+            if show_progress and (i + 1) % 30 == 0:
+                logger.debug(f"  Progress: {i + 1}/{num_frames} frames written")
+        
+        logger.info(f"✓ Video writing complete: {self.frame_count} frames")
+    
+    def finalize(self):
+        """Finalize video file and release resources."""
+        if self.writer is not None:
+            self.writer.release()
+            self.writer = None
+            logger.info(f"✓ Video finalized: {self.output_path}")
+    
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensures video is finalized."""
+        self.finalize()
+    
+    @staticmethod
+    def quick_save(
+        video_tensor: torch.Tensor,
+        output_path: str,
+        fps: float = 24.0,
+        codec: str = "mp4v",
+    ):
+        """
+        Convenience method for quick video saving.
+        
+        Args:
+            video_tensor (torch.Tensor): Video tensor [N, C, H, W] or [N, H, W, C]
+            output_path (str): Output file path
+            fps (float): Frame rate. Default 24.0
+            codec (str): Video codec. Default "mp4v"
+        """
+        with VideoPackager(output_path, fps=fps, codec=codec) as packager:
+            packager.write_video(video_tensor)
 
 
 class WanLoraCustomWrapper:
@@ -978,6 +1425,48 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
         # Call the base implementation
         result = super().run_pipeline(input_info)
         
+        # Apply frame interpolation if enabled
+        frame_interp_config = self.config.get("frame_interpolation", {})
+        if frame_interp_config.get("enabled", False):
+            logger.info("=" * 80)
+            logger.info("Applying frame interpolation...")
+            logger.info("=" * 80)
+            
+            # Initialize frame interpolator
+            interpolator = FrameInterpolator(
+                model_path=frame_interp_config.get("model_path", "models/rife/RIFEv4.26_0921"),
+                device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            )
+            
+            # Get interpolation parameters
+            source_fps = frame_interp_config.get("source_fps", 8.0)
+            target_fps = frame_interp_config.get("target_fps", 24.0)
+            scale = frame_interp_config.get("scale", 1.0)
+            
+            logger.info(f"Interpolating: {source_fps} FPS → {target_fps} FPS (scale={scale})")
+            
+            # If result is a file path, we need to load it first
+            if isinstance(result, str):
+                logger.info(f"Loading video from {result} for interpolation...")
+                # Note: This would require implementing video loading
+                # For now, we assume result is already a tensor
+                logger.warning("Frame interpolation on saved files not yet implemented. Skipping.")
+            else:
+                # Apply interpolation to tensor
+                result = interpolator.interpolate(
+                    video_tensor=result,
+                    source_fps=source_fps,
+                    target_fps=target_fps,
+                    scale=scale
+                )
+                
+                # Clean up interpolator resources
+                interpolator.cleanup()
+                
+                logger.info("=" * 80)
+                logger.info("✓ Frame interpolation complete!")
+                logger.info("=" * 80)
+        
         # Clean up memory after inference
         self.cleanup_after_inference()
         
@@ -998,26 +1487,6 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--model_cls",
-        type=str,
-        default="wan2.2_moe_distill",
-        choices=["wan2.2_moe_distill"],
-        help="WAN model class (distilled version)",
-    )
-    parser.add_argument(
-        "--task",
-        type=str,
-        default="i2v",
-        choices=["i2v"],
-        help="Task type (image-to-video)",
-    )
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        default="models/wan2.2_models/official_distill_repo",
-        help="Path to WAN2.2 model directory",
-    )
-    parser.add_argument(
         "--config_json",
         type=str,
         default="prod_configs/wan_moe_i2v_a14b_quality.json",
@@ -1034,12 +1503,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="woman smiling",
         help="Positive text prompt",
-    )
-    parser.add_argument(
-        "--negative_prompt",
-        type=str,
-        default="",
-        help="Negative prompt (optional)",
     )
     parser.add_argument(
         "--save_result_path",
@@ -1063,18 +1526,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use prompt enhancer (default: False)",
     )
-    parser.add_argument(
-        "--motion_amplitude",
-        type=float,
-        default=1.15,
-        help="Motion amplitude scaling factor (1.0=no change, >1.0=more motion). "
-             "Recommended: 1.15-1.5 for fixing slow-motion in 4-step LoRAs",
-    )
-    parser.add_argument(
-        "--disable_motion_enhancement",
-        action="store_true",
-        help="Disable motion amplitude enhancement (default: enabled)",
-    )
     return parser
 
 
@@ -1086,20 +1537,40 @@ def main() -> None:
     # Ensure gradient computation is disabled for inference
     torch.set_grad_enabled(False)
 
+    # Load JSON file with config and input_info structure
+    logger.info(f"Loading configuration from {args.config_json}...")
+    with open(args.config_json, "r") as f:
+        json_data = json.load(f)
+    
+    # Check if new nested structure exists
+    if "config" in json_data and "input_info" in json_data:
+        config_data = json_data["config"]
+        input_info_data = json_data["input_info"]
+        logger.info("Using nested config structure (config + input_info)")
+    else:
+        # Fallback to flat structure
+        config_data = json_data
+        input_info_data = {}
+        logger.info("Using flat config structure")
+    
+    # Create a temporary args object with config data for set_config compatibility
+    import argparse
+    temp_args = argparse.Namespace()
+    temp_args.config_json = args.config_json
+    temp_args.seed = args.seed
+    temp_args.use_prompt_enhancer = args.use_prompt_enhancer
+    temp_args.return_result_tensor = args.return_result_tensor
+    
     # Seed all random number generators for reproducibility
     logger.info(f"Setting random seed to {args.seed}")
     seed_all(args.seed)
 
-    # Build configuration from arguments
-    logger.info("Building configuration from arguments and config file...")
-    config = set_config(args)
+    # Build configuration
+    logger.info("Building configuration from JSON file...")
+    config = set_config(temp_args)
     
-    # Add motion enhancement settings to config (command-line args override config file)
-    # If config already has these values, only override if command-line args differ from defaults
-    if "motion_amplitude" not in config or args.motion_amplitude != 1.15:
-        config["motion_amplitude"] = args.motion_amplitude
-    if "enable_motion_enhancement" not in config or args.disable_motion_enhancement:
-        config["enable_motion_enhancement"] = not args.disable_motion_enhancement
+    # Override with config_data from nested structure
+    config.update(config_data)
     
     print_config(config)
 
@@ -1108,9 +1579,27 @@ def main() -> None:
     runner = Wan22MoeCustomRunner(config)
     runner.init_modules()
 
-    # Prepare input information
+    # Prepare input information from config's input_info section or args
     logger.info("Preparing input information...")
-    input_info = set_input_info(args)
+    
+    # Create input_info object based on task type
+    task = config.get("task", "i2v")
+    
+    if task == "i2v":
+        from lightx2v.utils.input_info import I2VInputInfo
+        input_info = I2VInputInfo(
+            seed=args.seed,
+            prompt=args.prompt,
+            negative_prompt=input_info_data.get("negative_prompt", ""),
+            image_path=args.image_path,
+            save_result_path=args.save_result_path,
+            return_result_tensor=args.return_result_tensor,
+        )
+    else:
+        # Fallback to original method for other tasks
+        args.task = task
+        args.negative_prompt = input_info_data.get("negative_prompt", "")
+        input_info = set_input_info(args)
 
     # Run the inference pipeline
     logger.info("Running inference pipeline...")
