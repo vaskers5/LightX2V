@@ -46,7 +46,7 @@
     "target_video_length": 81,
     "target_height": 1280,
     "target_width": 720,
-    "infer_steps": 4,
+    "infer_steps": 8,
     "self_attn_1_type": "sage_attn2",
     "cross_attn_1_type": "sage_attn2",
     "cross_attn_2_type": "sage_attn2",
@@ -56,26 +56,34 @@
     "offload_granularity": "phase",
     "t5_cpu_offload": true,
     "vae_cpu_offload": true,
-    "boundary_step_index": 2,
+    "boundary_step_index": 5,
     "denoising_step_list_high": [
         1000,
-        750
+        875,
+        750,
+        625,
+        500
     ],
     "denoising_step_list_low": [
-        500,
-        250
+        375,
+        250,
+        125
     ],
     "denoising_step_list": [
         1000,
+        875,
         750,
+        625,
         500,
-        250
+        375,
+        250,
+        125
     ],
     "dit_quantized": true,
     "dit_quant_scheme": "fp8-sgl",
     "t5_quantized": false,
     "motion_amplitude": 1.15,
-    "enable_motion_enhancement": true,
+    "enable_motion_enhancement": false,
     "lora_configs": [
         {
             "name": "high_noise_model",
