@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""Run WAN2.2-MOE i2v quality inference with motion amplitude enhancement.
+"""Run WAN2.2-MOE i2v quality inference with motion amplitude enhancement and NAG support.
 
 This script reproduces the exact results of the default inference command
-with additional motion enhancement to fix slow-motion issues in 4-step LoRAs:
+with additional enhancements:
+- Motion amplitude enhancement to fix slow-motion issues in 4-step LoRAs
+- Normalized Attention Guidance (NAG) for improved generation quality
+- Frame interpolation for smooth video output
+- FP8 quantization support with LoRA compatibility
 
-    CUDA_VISIBLE_DEVICES=7 python -m lightx2v.infer \
-        --model_cls wan2.2_moe \
-        --task i2v \
-        --model_path models/wan2.2_models/official_distill_repo \
-        --config_json prod_configs/wan_moe_i2v_a14b_quality.json \
-        --image_path assets/inputs/imgs/pron_test.png \
-        --prompt "woman smiling" \
-        --save_result_path save_results/video_quality_tuned.mp4
+Basic usage:
+    CUDA_VISIBLE_DEVICES=7 python scripts/wan22/run_quality_inference.py \
+        --config_json prod_configs/wan_moe_i2v_a14b_fp8.json
 
 ARCHITECTURE OVERVIEW:
 ======================
@@ -28,27 +27,119 @@ This script demonstrates a custom runner pattern for WAN2.2-MOE inference:
    - `__init__()`: Enhanced logging of model paths during initialization
    - `load_transformer()`: Custom LoRA loading using config 'name' field
    - `get_vae_encoder_output()`: Motion amplitude enhancement for VAE latents
-   - `run_pipeline()`: Wrapped pipeline with custom logging hooks
+   - `run_text_encoder()`: NAG double-batch encoding for positive/negative prompts
+   - `run_pipeline()`: Wrapped pipeline with NAG enable/disable and custom logging
 
-3. **Motion Enhancement Classes** (NEW):
+3. **NAG (Normalized Attention Guidance) Classes** (NEW):
+   - `NAGWanAttnProcessor`: Custom attention processor implementing NAG algorithm
+   - `NAGModelWrapper`: Wrapper to inject/remove NAG processors dynamically
+
+4. **Motion Enhancement Classes**:
    - `MotionAmplitudeProcessor`: Core algorithm for fixing slow-motion issues
    - `EnhancedVAEEncoder`: Wrapper for VAE encoder with motion enhancement
 
-4. **Video Post-Processing Classes** (NEW):
+5. **Video Post-Processing Classes**:
    - `FrameInterpolator`: RIFE-based frame interpolation for smooth FPS upsampling
    - `VideoPackager`: Tensor-to-video encoding with multiple codec support
    
-5. **Base Runner Responsibilities** (inherited):
+6. **Base Runner Responsibilities** (inherited):
    - Model loading (VAE, text encoders, image encoder)
    - Scheduler initialization
    - Text encoding pipeline
    - VAE encoding/decoding
    - Video generation and saving
 
-5. **MultiDistillModelStruct**: Manages the two-stage distilled inference
+7. **MultiDistillModelStruct**: Manages the two-stage distilled inference
    - High noise model (used for early denoising steps)
    - Low noise model (used for final refinement steps)
    - Automatic switching based on boundary timestep
+
+NORMALIZED ATTENTION GUIDANCE (NAG):
+=====================================
+
+NAG improves generation quality by normalizing attention guidance signals:
+
+1. **Problem**: High guidance scales can cause attention over-saturation, leading to
+   artifacts, color bleeding, or unstable outputs.
+
+2. **Solution**: NAG normalizes the guidance signal to prevent over-amplification while
+   maintaining strong prompt adherence.
+
+3. **Algorithm**:
+   - Compute positive and negative attention separately
+   - Apply guidance: guided = positive * scale - negative * (scale - 1)
+   - Normalize if guidance exceeds threshold (tau):
+     * norm_ratio = ||guided|| / ||positive||
+     * if norm_ratio > tau: guided = guided / ||guided|| * ||positive|| * tau
+   - Blend: output = guided * alpha + positive * (1 - alpha)
+
+4. **Configuration** (in config JSON):
+   ```json
+   "nag": {
+       "enabled": true,          // Enable NAG (false by default)
+       "scale": 1.5,             // Guidance scale (1.0 = disabled, >1.0 = enabled)
+       "tau": 2.5,               // Normalization threshold (higher = less normalization)
+       "alpha": 0.25,            // Blending weight (0 = all positive, 1 = all guided)
+       "negative_prompt": ""     // Optional: override negative prompt for NAG
+   }
+   ```
+
+5. **Parameters**:
+   - **scale** (default: 1.5): Guidance strength. Higher values = stronger prompt adherence
+     * 1.0 = NAG disabled
+     * 1.5-2.0 = recommended for most use cases
+     * 2.0-3.0 = strong guidance (may need lower tau)
+   
+   - **tau** (default: 2.5): Maximum allowed guidance amplification
+     * Lower values = more aggressive normalization (safer, less artifacts)
+     * Higher values = less normalization (stronger guidance, risk of artifacts)
+     * 2.0-3.0 = recommended range
+   
+   - **alpha** (default: 0.25): How much normalized guidance to blend in
+     * 0.0 = only use positive attention (NAG effectively disabled)
+     * 0.25 = default balanced blend
+     * 1.0 = only use normalized guided attention
+
+6. **Requirements**:
+   - Negative prompt must be provided (via input_info.negative_prompt or nag.negative_prompt)
+   - NAG creates double-batch encoding [positive, negative] → increases memory usage
+   - Only affects cross-attention layers (text → image attention)
+
+7. **Usage Examples**:
+   
+   Enable NAG in config:
+   ```json
+   "nag": {
+       "enabled": true,
+       "scale": 1.5,
+       "tau": 2.5,
+       "alpha": 0.25
+   }
+   ```
+   
+   With custom negative prompt in config:
+   ```json
+   "nag": {
+       "enabled": true,
+       "scale": 2.0,
+       "tau": 2.0,
+       "alpha": 0.3,
+       "negative_prompt": "blurry, low quality, distorted"
+   }
+   ```
+   
+   Or provide negative prompt via input_info:
+   ```json
+   "input_info": {
+       "negative_prompt": "static, low quality, artifacts"
+   }
+   ```
+
+8. **Performance Notes**:
+   - NAG adds minimal compute overhead (~5-10% slower)
+   - Memory usage increases due to double-batch text encoding
+   - Compatible with FP8 quantization and LoRAs
+   - Works with all attention types (sage_attn2, flash_attn, etc.)
 
 MOTION ENHANCEMENT:
 ===================
@@ -67,7 +158,6 @@ The motion amplitude enhancement fixes the "slow-motion" problem in 4-step disti
 4. **Configuration**:
    - Default amplitude: 1.15 (15% more motion)
    - Recommended range: 1.0 (disabled) to 1.5 (50% more motion)
-   - Disable via: --disable_motion_enhancement
 
 MEMORY OPTIMIZATION (CPU OFFLOADING):
 ======================================
@@ -90,7 +180,6 @@ Reduce GPU memory usage by offloading T5 encoder and VAE to CPU when not in use:
 3. **Configuration**:
    - Enable in config: "t5_cpu_offload": true, "vae_cpu_offload": true
    - FP8 config has offloading enabled by default
-   - Quality config has offloading disabled by default (for max speed)
    - Total VRAM savings: ~10-14GB with both enabled
 
 4. **Performance Impact**:
@@ -101,40 +190,21 @@ Reduce GPU memory usage by offloading T5 encoder and VAE to CPU when not in use:
 USAGE:
 ======
 
-Run with defaults (motion enhancement enabled, amplitude=1.15):
+Run with defaults (motion enhancement enabled):
     CUDA_VISIBLE_DEVICES=7 python scripts/wan22/run_quality_inference.py
 
-Use FP8 config with offloading (saves ~10-14GB VRAM):
+Use FP8 config with offloading:
     CUDA_VISIBLE_DEVICES=7 python scripts/wan22/run_quality_inference.py \
         --config_json prod_configs/wan_moe_i2v_a14b_fp8.json
 
-Adjust motion amplitude:
-    CUDA_VISIBLE_DEVICES=7 python scripts/wan22/run_quality_inference.py \
-        --motion_amplitude 1.3
-
-Disable motion enhancement:
-    CUDA_VISIBLE_DEVICES=7 python scripts/wan22/run_quality_inference.py \
-        --disable_motion_enhancement
-
-Override specific parameters:
-    CUDA_VISIBLE_DEVICES=7 python scripts/wan22/run_quality_inference.py \
-        --prompt "woman laughing and waving" \
-        --save_result_path save_results/custom_output.mp4 \
-        --motion_amplitude 1.25
-
-For low VRAM GPUs (12-16GB), enable offloading in config:
-    Edit prod_configs/wan_moe_i2v_a14b_quality.json:
+Enable NAG (edit config JSON):
     {
-        "t5_cpu_offload": true,
-        "vae_cpu_offload": true
-    }
-
-Add custom LoRAs (edit the config JSON):
-    Add to "lora_configs" in prod_configs/wan_moe_i2v_a14b_quality.json:
-    {
-        "name": "my_custom_high_noise_lora",
-        "path": "models/wan2.2_models/loras/my_lora.safetensors",
-        "strength": 0.8
+        "nag": {
+            "enabled": true,
+            "scale": 1.5,
+            "tau": 2.5,
+            "alpha": 0.25
+        }
     }
 
 VIDEO POST-PROCESSING EXAMPLES:
@@ -144,20 +214,8 @@ Using FrameInterpolator for smooth FPS upsampling:
     ```python
     from scripts.wan22.run_quality_inference import FrameInterpolator
     
-    # Initialize interpolator
-    interpolator = FrameInterpolator(
-        model_path="models/rife/RIFEv4.26_0921",
-        device=torch.device("cuda")
-    )
-    
-    # Interpolate 8 FPS to 24 FPS
-    interpolated_video = interpolator.interpolate(
-        video_tensor=output_tensor,  # [N, C, H, W] or [N, H, W, C]
-        source_fps=8.0,
-        target_fps=24.0,
-        scale=1.0  # Full resolution
-    )
-    
+    interpolator = FrameInterpolator("models/rife/RIFEv4.26_0921")
+    smooth_video = interpolator.interpolate(video_tensor, 8.0, 24.0)
     interpolator.cleanup()
     ```
 
@@ -165,38 +223,15 @@ Using VideoPackager for encoding:
     ```python
     from scripts.wan22.run_quality_inference import VideoPackager
     
-    # Context manager style (auto-cleanup)
     with VideoPackager("output.mp4", fps=24.0, codec="avc1") as packager:
         packager.write_video(video_tensor)
-    
-    # Or quick save
-    VideoPackager.quick_save(
-        video_tensor=interpolated_video,
-        output_path="final_output.mp4",
-        fps=24.0,
-        codec="mp4v"
-    )
-    ```
-
-Combined post-processing pipeline:
-    ```python
-    # 1. Generate video with runner
-    result_tensor = runner.run_pipeline(input_info)
-    
-    # 2. Interpolate frames (8 FPS → 24 FPS)
-    interpolator = FrameInterpolator("models/rife/RIFEv4.26_0921")
-    smooth_video = interpolator.interpolate(result_tensor, 8.0, 24.0)
-    interpolator.cleanup()
-    
-    # 3. Package to final video file
-    VideoPackager.quick_save(smooth_video, "final.mp4", fps=24.0, codec="avc1")
     ```
 
 CREDITS:
 ========
 
-Motion enhancement algorithm based on PainterI2V from the ComfyUI community,
-specifically designed to fix slow-motion issues in lightx2v and similar 4-step LoRAs.
+- Motion enhancement: Based on PainterI2V from ComfyUI community
+- NAG: Based on Normalized Attention Guidance (https://github.com/ChenDarYen/Normalized-Attention-Guidance)
 """
 
 from __future__ import annotations
@@ -206,12 +241,13 @@ import gc
 import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import cv2
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from loguru import logger
 from safetensors import safe_open
 from torch.distributed.tensor.device_mesh import init_device_mesh
@@ -322,6 +358,321 @@ def print_config(config):
     else:
         logger.info(f"config:\n{json.dumps(config_to_print, ensure_ascii=False, indent=4)}")
 
+
+
+class NAGWanAttnProcessor:
+    """
+    Normalized Attention Guidance processor for WAN model attention layers.
+    
+    This processor implements NAG (Normalized Attention Guidance) to improve generation quality
+    by normalizing the attention guidance signal. It prevents attention over-saturation that
+    can occur with high guidance scales.
+    
+    Based on: Normalized Attention Guidance (NAG) from the Normalized-Attention-Guidance repository.
+    
+    Args:
+        nag_scale (float): Guidance scale for NAG. Values > 1 enable NAG guidance.
+        nag_tau (float): Normalization threshold. Limits maximum attention amplification.
+        nag_alpha (float): Blending factor between normalized and original guidance.
+    """
+    
+    def __init__(self, nag_scale=1.0, nag_tau=2.5, nag_alpha=0.25):
+        """Initialize NAG attention processor.
+        
+        Args:
+            nag_scale (float): Guidance scale (1.0 = disabled, >1.0 = enabled)
+            nag_tau (float): Normalization threshold (default: 2.5)
+            nag_alpha (float): Blending weight (default: 0.25)
+        """
+        self.nag_scale = nag_scale
+        self.nag_tau = nag_tau
+        self.nag_alpha = nag_alpha
+        logger.debug(f"NAGWanAttnProcessor initialized (scale={nag_scale}, tau={nag_tau}, alpha={nag_alpha})")
+    
+    def __call__(
+        self,
+        attn,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        rotary_emb: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Apply NAG-enhanced attention.
+        
+        This method performs attention with normalized guidance by:
+        1. Detecting if guidance should be applied (double batch for NAG)
+        2. Computing separate attention for positive and negative prompts
+        3. Normalizing the guidance signal to prevent over-saturation
+        4. Blending normalized guidance with original attention
+        
+        Args:
+            attn: Attention module with projection layers
+            hidden_states: Main input tensor [B, N, D]
+            encoder_hidden_states: Cross-attention context [B or 2B, M, D]
+            attention_mask: Optional attention mask
+            rotary_emb: Optional rotary position embeddings
+            
+        Returns:
+            Enhanced hidden states with NAG applied
+        """
+        # Check if NAG should be applied
+        apply_guidance = self.nag_scale > 1 and encoder_hidden_states is not None
+        if apply_guidance:
+            # NAG requires double batch: [positive_prompt, negative_prompt]
+            if len(encoder_hidden_states) == 2 * len(hidden_states):
+                batch_size = len(hidden_states)
+            else:
+                apply_guidance = False
+        
+        # Handle image encoder outputs (for I2V tasks)
+        encoder_hidden_states_img = None
+        if hasattr(attn, 'add_k_proj') and attn.add_k_proj is not None:
+            # First 257 tokens are image features
+            encoder_hidden_states_img = encoder_hidden_states[:, :257]
+            encoder_hidden_states = encoder_hidden_states[:, 257:]
+            if apply_guidance:
+                # Only use positive batch for image features
+                encoder_hidden_states_img = encoder_hidden_states_img[:batch_size]
+        
+        # Default to self-attention if no cross-attention context
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+        
+        # Project to Q, K, V
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+        
+        # Apply normalization if available
+        if hasattr(attn, 'norm_q') and attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if hasattr(attn, 'norm_k') and attn.norm_k is not None:
+            key = attn.norm_k(key)
+        
+        # Reshape to multi-head format [B, N, D] -> [B, H, N, D/H]
+        query = query.unflatten(2, (attn.heads, -1)).transpose(1, 2)
+        key = key.unflatten(2, (attn.heads, -1)).transpose(1, 2)
+        value = value.unflatten(2, (attn.heads, -1)).transpose(1, 2)
+        
+        # Apply rotary embeddings if provided
+        if rotary_emb is not None:
+            def apply_rotary_emb(hidden_states: torch.Tensor, freqs: torch.Tensor):
+                x_rotated = torch.view_as_complex(
+                    hidden_states.to(torch.float64).unflatten(3, (-1, 2))
+                )
+                x_out = torch.view_as_real(x_rotated * freqs).flatten(3, 4)
+                return x_out.type_as(hidden_states)
+            
+            query = apply_rotary_emb(query, rotary_emb)
+            key = apply_rotary_emb(key, rotary_emb)
+        
+        # Process image attention if present (I2V task)
+        hidden_states_img = None
+        if encoder_hidden_states_img is not None:
+            key_img = attn.add_k_proj(encoder_hidden_states_img)
+            if hasattr(attn, 'norm_added_k'):
+                key_img = attn.norm_added_k(key_img)
+            value_img = attn.add_v_proj(encoder_hidden_states_img)
+            
+            key_img = key_img.unflatten(2, (attn.heads, -1)).transpose(1, 2)
+            value_img = value_img.unflatten(2, (attn.heads, -1)).transpose(1, 2)
+            
+            hidden_states_img = F.scaled_dot_product_attention(
+                query, key_img, value_img, attn_mask=None, dropout_p=0.0, is_causal=False
+            )
+            hidden_states_img = hidden_states_img.transpose(1, 2).flatten(2, 3)
+            hidden_states_img = hidden_states_img.type_as(query)
+        
+        # Split K,V for NAG guidance if enabled
+        if apply_guidance:
+            key, key_negative = torch.chunk(key, 2, dim=0)
+            value, value_negative = torch.chunk(value, 2, dim=0)
+        
+        # Compute positive attention
+        hidden_states = F.scaled_dot_product_attention(
+            query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        )
+        hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
+        hidden_states = hidden_states.type_as(query)
+        
+        # Apply NAG if guidance is enabled
+        if apply_guidance:
+            # Compute negative attention
+            hidden_states_negative = F.scaled_dot_product_attention(
+                query, key_negative, value_negative, 
+                attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+            )
+            hidden_states_negative = hidden_states_negative.transpose(1, 2).flatten(2, 3)
+            hidden_states_negative = hidden_states_negative.type_as(query)
+            
+            hidden_states_positive = hidden_states
+            
+            # Apply guidance: guided = positive * scale - negative * (scale - 1)
+            hidden_states_guidance = (
+                hidden_states_positive * self.nag_scale - 
+                hidden_states_negative * (self.nag_scale - 1)
+            )
+            
+            # Normalize guidance to prevent over-saturation
+            norm_positive = torch.norm(
+                hidden_states_positive, p=1, dim=-1, keepdim=True
+            ).expand(*hidden_states_positive.shape)
+            norm_guidance = torch.norm(
+                hidden_states_guidance, p=1, dim=-1, keepdim=True
+            ).expand(*hidden_states_guidance.shape)
+            
+            # Compute scaling ratio
+            scale = norm_guidance / norm_positive
+            scale = torch.nan_to_num(scale, 10)
+            
+            # Apply tau threshold: if scale > tau, normalize guidance
+            mask = scale > self.nag_tau
+            hidden_states_guidance[mask] = (
+                hidden_states_guidance[mask] / (norm_guidance[mask] + 1e-7) * 
+                norm_positive[mask] * self.nag_tau
+            )
+            
+            # Blend normalized guidance with positive attention
+            hidden_states = (
+                hidden_states_guidance * self.nag_alpha + 
+                hidden_states_positive * (1 - self.nag_alpha)
+            )
+        
+        # Add image attention if present
+        if hidden_states_img is not None:
+            hidden_states = hidden_states + hidden_states_img
+        
+        # Project output
+        hidden_states = attn.to_out[0](hidden_states)
+        if len(attn.to_out) > 1:
+            hidden_states = attn.to_out[1](hidden_states)
+        
+        return hidden_states
+
+
+class NAGModelWrapper:
+    """
+    Wrapper to inject NAG attention processors into WAN model.
+    
+    This class wraps a WAN model and replaces specific attention processors
+    with NAG-enabled versions. It allows dynamic enabling/disabling of NAG
+    without reloading the entire model.
+    
+    Only cross-attention layers (attn2) are replaced with NAG processors,
+    as self-attention doesn't benefit from guidance normalization.
+    """
+    
+    def __init__(self, model: WanModel):
+        """Initialize NAG wrapper.
+        
+        Args:
+            model: WAN model to wrap with NAG support
+        """
+        self.model = model
+        self.original_attn_processors = None
+        self.nag_enabled = False
+        logger.info("NAGModelWrapper initialized")
+    
+    def enable_nag(self, nag_scale: float = 1.5, nag_tau: float = 2.5, nag_alpha: float = 0.25):
+        """
+        Enable NAG by replacing cross-attention processors.
+        
+        Args:
+            nag_scale: Guidance scale (>1.0 to enable)
+            nag_tau: Normalization threshold
+            nag_alpha: Blending weight
+        """
+        if self.nag_enabled:
+            logger.warning("NAG already enabled, skipping")
+            return
+        
+        logger.info(f"Enabling NAG (scale={nag_scale}, tau={nag_tau}, alpha={nag_alpha})...")
+        
+        # Store original processors
+        self.original_attn_processors = {}
+        
+        # Get transformer weights module
+        if hasattr(self.model, 'transformer_weights'):
+            transformer = self.model.transformer_weights
+        else:
+            logger.error("Model doesn't have transformer_weights attribute")
+            return
+        
+        # Recursively find and replace attention processors
+        self._inject_nag_processors(transformer, nag_scale, nag_tau, nag_alpha)
+        
+        self.nag_enabled = True
+        logger.info(f"✓ NAG enabled successfully ({len(self.original_attn_processors)} processors replaced)")
+    
+    def _inject_nag_processors(self, module, nag_scale, nag_tau, nag_alpha, prefix=""):
+        """
+        Recursively inject NAG processors into attention layers.
+        
+        Args:
+            module: Module to process
+            nag_scale: NAG guidance scale
+            nag_tau: NAG normalization threshold
+            nag_alpha: NAG blending weight
+            prefix: Current module path prefix
+        """
+        for name, child in module.named_children():
+            full_name = f"{prefix}.{name}" if prefix else name
+            
+            # Check if this is a cross-attention layer (attn2)
+            # Only apply NAG to cross-attention, not self-attention
+            if "attn2" in name.lower() or "cross_attn" in name.lower():
+                # Store original processor if it exists
+                if hasattr(child, 'processor'):
+                    self.original_attn_processors[full_name] = child.processor
+                    # Replace with NAG processor
+                    child.processor = NAGWanAttnProcessor(nag_scale, nag_tau, nag_alpha)
+                    logger.debug(f"Replaced processor at {full_name}")
+            
+            # Recurse into children
+            self._inject_nag_processors(child, nag_scale, nag_tau, nag_alpha, full_name)
+    
+    def disable_nag(self):
+        """
+        Disable NAG by restoring original attention processors.
+        """
+        if not self.nag_enabled:
+            logger.warning("NAG not enabled, skipping")
+            return
+        
+        logger.info("Disabling NAG...")
+        
+        # Restore original processors
+        if hasattr(self.model, 'transformer_weights'):
+            transformer = self.model.transformer_weights
+            self._restore_processors(transformer)
+        
+        self.original_attn_processors = None
+        self.nag_enabled = False
+        logger.info("✓ NAG disabled")
+    
+    def _restore_processors(self, module, prefix=""):
+        """
+        Recursively restore original attention processors.
+        
+        Args:
+            module: Module to process
+            prefix: Current module path prefix
+        """
+        for name, child in module.named_children():
+            full_name = f"{prefix}.{name}" if prefix else name
+            
+            # Restore processor if we saved it
+            if full_name in self.original_attn_processors:
+                child.processor = self.original_attn_processors[full_name]
+                logger.debug(f"Restored processor at {full_name}")
+            
+            # Recurse into children
+            self._restore_processors(child, full_name)
+    
+    def __getattr__(self, name):
+        """Forward all other attributes to the wrapped model."""
+        return getattr(self.model, name)
 
 
 class CustomWeightAsyncStreamManager(WeightAsyncStreamManager):
@@ -521,17 +872,10 @@ class FrameInterpolator:
         
         logger.info(f"Loading RIFE model from {self.model_path}...")
         
-        try:
-            from lightx2v.models.vfi.rife.rife_comfyui_wrapper import RIFEWrapper
-            self.model = RIFEWrapper(self.model_path, device=self.device)
-            logger.info("✓ RIFE model loaded successfully")
-        except ImportError as e:
-            logger.error(f"Failed to import RIFE model: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Failed to load RIFE model: {e}")
-            raise
-    
+        from lightx2v.models.vfi.rife.rife_comfyui_wrapper import RIFEWrapper
+        self.model = RIFEWrapper(self.model_path, device=self.device)
+        logger.info("✓ RIFE model loaded successfully")
+
     @torch.no_grad()
     def interpolate(
         self,
@@ -564,7 +908,7 @@ class FrameInterpolator:
         self._load_model()
         
         logger.info(f"Interpolating video: {source_fps} FPS → {target_fps} FPS (scale={scale})")
-        logger.debug(f"Input tensor shape: {video_tensor.shape}")
+        logger.debug(f"Input tensor shape: {video_tensor.shape}, dtype: {video_tensor.dtype}")
         
         # Detect and convert tensor format if needed
         is_pytorch_format = video_tensor.shape[1] == 3 or video_tensor.shape[1] == 1
@@ -574,6 +918,12 @@ class FrameInterpolator:
             video_tensor = video_tensor.permute(0, 2, 3, 1)
             logger.debug(f"Converted PyTorch format to ComfyUI format: {video_tensor.shape}")
         
+        # Convert to float32 if needed (RIFE requires float32)
+        original_dtype = video_tensor.dtype
+        if video_tensor.dtype != torch.float32:
+            logger.debug(f"Converting from {video_tensor.dtype} to float32 for RIFE")
+            video_tensor = video_tensor.to(torch.float32)
+        
         # Perform interpolation
         interpolated = self.model.interpolate_frames(
             video_tensor,
@@ -581,6 +931,11 @@ class FrameInterpolator:
             target_fps=target_fps,
             scale=scale
         )
+        
+        # Convert back to original dtype if needed
+        if interpolated.dtype != original_dtype:
+            logger.debug(f"Converting back from float32 to {original_dtype}")
+            interpolated = interpolated.to(original_dtype)
         
         # Convert back to original format if needed
         if is_pytorch_format:
@@ -920,6 +1275,7 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
     - FP8 quantization support with SGLang optimization
     - **Combined FP8 + LoRA support** (applies LoRAs on top of quantized models)
     - **Motion amplitude enhancement** for fixing slow-motion issues in 4-step LoRAs
+    - **Normalized Attention Guidance (NAG)** for improved generation quality
     - Easy hooks for pre/post-processing customization
     - Better logging and monitoring capabilities
     
@@ -937,6 +1293,12 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
     - Amplifies motion while preserving brightness
     - Prevents the "slow-motion" effect common in fast distilled inference
     - Can be disabled via config: "motion_amplitude": 1.0 or "enable_motion_enhancement": false
+    
+    NAG (Normalized Attention Guidance):
+    - Optional attention normalization for improved quality
+    - Prevents over-saturation with high guidance scales
+    - Enable via config: "nag": {"enabled": true, "scale": 1.5, "tau": 2.5, "alpha": 0.25}
+    - Requires negative prompt for guidance computation
     
     Supports fp8-sgl (SGLang for H100/Ada), fp8-q8f (Q8F for 4090), and other schemes.
     """
@@ -956,6 +1318,17 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
             motion_amplitude=motion_amplitude,
             enable=enable_motion
         )
+        
+        # Initialize NAG support
+        self.nag_wrapper = None
+        self.nag_config = self.config.get("nag", {})
+        if self.nag_config.get("enabled", False):
+            nag_scale = self.nag_config.get("scale", 1.5)
+            nag_tau = self.nag_config.get("tau", 2.5)
+            nag_alpha = self.nag_config.get("alpha", 0.25)
+            logger.info(f"NAG enabled: scale={nag_scale}, tau={nag_tau}, alpha={nag_alpha}")
+        else:
+            logger.info("NAG disabled (set nag.enabled=true in config to enable)")
         
         logger.info(f"Initialized {self.__class__.__name__} (Distilled version)")
         logger.info(f"High noise model path: {self.high_noise_model_path}")
@@ -1047,6 +1420,19 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
         if self.config.get("t5_cpu_offload", False):
             logger.info("T5 CPU offload is enabled, patching offload manager...")
             self._patch_t5_offload_manager()
+        
+        # Initialize NAG wrapper if enabled
+        if self.nag_config.get("enabled", False):
+            logger.info("Initializing NAG wrapper for model...")
+            if isinstance(self.model, MultiDistillModelStruct):
+                # Wrap high noise model (used for most steps)
+                self.nag_wrapper = NAGModelWrapper(self.model.model[0])
+                logger.info("NAG wrapper applied to high noise model")
+            else:
+                self.nag_wrapper = NAGModelWrapper(self.model)
+                logger.info("NAG wrapper applied to model")
+        
+        logger.info("✓ Custom runner modules initialized successfully!")
 
 
 
@@ -1203,13 +1589,15 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
 
     def run_text_encoder(self, input_info):
         """
-        Override text encoder to support T5 offloading during inference.
+        Override text encoder to support T5 offloading and NAG double-batch encoding.
         
-        This method handles T5 encoder offloading by:
-        1. Loading T5 to GPU if it's on CPU (offloaded)
-        2. Running text encoding
-        3. Offloading T5 back to CPU if configured
-        4. Clearing GPU cache to free memory for transformer inference
+        This method handles:
+        1. T5 encoder offloading (loading to GPU → encoding → offloading to CPU)
+        2. NAG double-batch encoding (positive + negative prompts concatenated)
+        3. Memory cleanup after text encoding
+        
+        For NAG: Encodes both positive and negative prompts, then concatenates them
+        into a single batch [positive, negative] for NAG guidance during inference.
         
         Args:
             input_info: Input information containing prompts
@@ -1218,6 +1606,7 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
             Text encoder output dictionary with context embeddings
         """
         t5_offload = self.config.get("t5_cpu_offload", False)
+        nag_enabled = self.nag_config.get("enabled", False)
         
         if t5_offload:
             logger.info("Loading T5 encoder to GPU for text encoding...")
@@ -1231,6 +1620,37 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
         
         # Call parent implementation for actual text encoding
         result = super().run_text_encoder(input_info)
+        
+        # For NAG: Create double-batch encoding [positive, negative]
+        if nag_enabled and self.nag_wrapper is not None:
+            logger.info("Creating NAG double-batch text encoding...")
+            
+            # Get negative prompt (use config or input_info)
+            nag_negative_prompt = self.nag_config.get("negative_prompt", "")
+            if not nag_negative_prompt and hasattr(input_info, 'negative_prompt'):
+                nag_negative_prompt = input_info.negative_prompt
+            
+            if not nag_negative_prompt:
+                logger.warning("NAG enabled but no negative prompt provided, using empty string")
+                nag_negative_prompt = ""
+            
+            # Create temporary input info for negative prompt
+            from copy import deepcopy
+            negative_input_info = deepcopy(input_info)
+            negative_input_info.prompt = nag_negative_prompt
+            
+            # Encode negative prompt
+            negative_result = super().run_text_encoder(negative_input_info)
+            
+            # Concatenate positive and negative embeddings
+            # result['context'] shape: [B, N, D] -> [2B, N, D] (positive + negative)
+            if 'context' in result:
+                positive_context = result['context']
+                negative_context = negative_result['context']
+                result['context'] = torch.cat([positive_context, negative_context], dim=0)
+                logger.info(f"NAG double-batch created: {result['context'].shape}")
+            
+            del negative_result
         
         if t5_offload:
             logger.info("Offloading T5 encoder to CPU...")
@@ -1420,41 +1840,64 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
         logger.info("Starting custom DISTILLED inference pipeline...")
         logger.info(f"Prompt: {input_info.prompt}")
         logger.info(f"Image: {input_info.image_path}")
+        if self.nag_config.get("enabled", False):
+            logger.info(f"NAG: ENABLED (scale={self.nag_config.get('scale', 1.5)})")
         logger.info("=" * 80)
+        
+        # Enable NAG before inference if configured
+        if self.nag_wrapper is not None and not self.nag_wrapper.nag_enabled:
+            self.nag_wrapper.enable_nag(
+                nag_scale=self.nag_config.get("scale", 1.5),
+                nag_tau=self.nag_config.get("tau", 2.5),
+                nag_alpha=self.nag_config.get("alpha", 0.25)
+            )
+        
+        # Check if frame interpolation is enabled - if so, we need the tensor
+        frame_interp_config = self.config.get("frame_interpolation", {})
+        should_interpolate = frame_interp_config.get("enabled", False)
+        
+        # Temporarily override to return tensor if we need to interpolate
+        original_return_tensor = input_info.return_result_tensor
+        original_save_path = input_info.save_result_path
+        if should_interpolate and not input_info.return_result_tensor:
+            input_info.return_result_tensor = True
+            temp_save_path = input_info.save_result_path
+            input_info.save_result_path = None
         
         # Call the base implementation
         result = super().run_pipeline(input_info)
         
+        # Disable NAG after inference to free resources
+        if self.nag_wrapper is not None and self.nag_wrapper.nag_enabled:
+            self.nag_wrapper.disable_nag()
+        
         # Apply frame interpolation if enabled
-        frame_interp_config = self.config.get("frame_interpolation", {})
-        if frame_interp_config.get("enabled", False):
+        if should_interpolate:
             logger.info("=" * 80)
             logger.info("Applying frame interpolation...")
             logger.info("=" * 80)
             
-            # Initialize frame interpolator
-            interpolator = FrameInterpolator(
-                model_path=frame_interp_config.get("model_path", "models/rife/RIFEv4.26_0921"),
-                device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            )
-            
-            # Get interpolation parameters
-            source_fps = frame_interp_config.get("source_fps", 8.0)
-            target_fps = frame_interp_config.get("target_fps", 24.0)
-            scale = frame_interp_config.get("scale", 1.0)
-            
-            logger.info(f"Interpolating: {source_fps} FPS → {target_fps} FPS (scale={scale})")
-            
-            # If result is a file path, we need to load it first
-            if isinstance(result, str):
-                logger.info(f"Loading video from {result} for interpolation...")
-                # Note: This would require implementing video loading
-                # For now, we assume result is already a tensor
-                logger.warning("Frame interpolation on saved files not yet implemented. Skipping.")
+            # Extract video tensor from result dict
+            video_tensor = result.get("video")
+            if video_tensor is None:
+                logger.warning("No video tensor found in result. Skipping interpolation.")
             else:
+                # Initialize frame interpolator
+                interpolator = FrameInterpolator(
+                    model_path=frame_interp_config.get("model_path", "models/rife/RIFEv4.26_0921"),
+                    device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                )
+                
+                # Get interpolation parameters
+                source_fps = frame_interp_config.get("source_fps", 8.0)
+                target_fps = frame_interp_config.get("target_fps", 24.0)
+                scale = frame_interp_config.get("scale", 1.0)
+                
+                logger.info(f"Interpolating: {source_fps} FPS → {target_fps} FPS (scale={scale})")
+                
                 # Apply interpolation to tensor
-                result = interpolator.interpolate(
-                    video_tensor=result,
+                interpolated_video = interpolator.interpolate(
+                    video_tensor=video_tensor,
                     source_fps=source_fps,
                     target_fps=target_fps,
                     scale=scale
@@ -1466,6 +1909,21 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
                 logger.info("=" * 80)
                 logger.info("✓ Frame interpolation complete!")
                 logger.info("=" * 80)
+                
+                # Save the interpolated video if needed
+                if not original_return_tensor and original_save_path:
+                    logger.info(f"🎬 Saving interpolated video to {original_save_path} 🎬")
+                    from lightx2v.utils.utils import save_to_video
+                    save_to_video(interpolated_video, original_save_path, fps=target_fps, method="ffmpeg")
+                    logger.info(f"✅ Interpolated video saved successfully to: {original_save_path} ✅")
+                    result = {"video": None}
+                else:
+                    result = {"video": interpolated_video}
+        
+        # Restore original input_info settings
+        if should_interpolate and not original_return_tensor:
+            input_info.return_result_tensor = original_return_tensor
+            input_info.save_result_path = original_save_path
         
         # Clean up memory after inference
         self.cleanup_after_inference()

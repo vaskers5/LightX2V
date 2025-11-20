@@ -79,10 +79,17 @@
         "enable_motion_enhancement": true,
         "frame_interpolation": {
             "enabled": true,
-            "model_path": "models/rife/RIFEv4.26_0921",
+            "model_path": "models/rife/RIFEv4.26_0921/flownet.pkl",
             "source_fps": 8.0,
             "target_fps": 24.0,
             "scale": 1.0
+        },
+        "nag": {
+            "enabled": false,
+            "scale": 1.5,
+            "tau": 2.5,
+            "alpha": 0.25,
+            "negative_prompt": ""
         },
         "lora_configs": [
             {
