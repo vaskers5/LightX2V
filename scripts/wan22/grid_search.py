@@ -94,6 +94,7 @@ available_loras = {
             "strength": 1.0
         } 
         ]
+    ]
         # [
         # {
         #     "name": "high_noise_model",
@@ -107,7 +108,19 @@ available_loras = {
         # } 
         # ],
 }
-                
+
+available_checkpoints = {
+    'fp8':
+        {
+        "high_noise_quantized_ckpt": "models/wan2.2_models/distill_models/wan2.2_i2v_A14b_high_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
+        "low_noise_quantized_ckpt": "models/wan2.2_models/distill_models/wan2.2_i2v_A14b_low_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors"
+        },
+    "bf16":
+        {
+        "high_noise_original_ckpt": "models/wan2.2_models/diffussion_models/wan2.2_i2v_A14b_high_noise_lightx2v_bf16.safetensors",
+        "low_noise_original_ckpt": "models/wan2.2_models/diffussion_models/wan2.2_i2v_A14b_low_noise_lightx2v_bf16.safetensors"     
+        }
+}          
 
 # ==================================================================================
 # SEARCH CONFIGURATION
@@ -137,7 +150,7 @@ GRID = {
         {"enabled": True, "amplitude": 1.2},
         {"enabled": True, "amplitude": 1.3},
     ],
-    "target_video_length": [61, 81, 121],
+    "target_video_length": [61, 81],
     "scheduler_type": ["EulerScheduler"],
     "nag": [
         {"enabled": False},
@@ -147,9 +160,8 @@ GRID = {
     ],
     # Special key for resolution (height, width) to ensure valid aspect ratios
     "resolution": [
+        (480, 854),
         (720, 1280),
-        (480, 832),
-        (1024, 1024),
     ],
      "t5_original_ckpt": 
          [
@@ -165,129 +177,14 @@ GRID = {
         {"prompt": BASE_PROMPT, "image_path": IMG_LIST[1], "seed": 42, "negative_prompt": ""},
         {"prompt": BASE_PROMPT, "image_path": IMG_LIST[2], "seed": 42, "negative_prompt": ""},
 
-    ],
-        "lora_configs": [
-        [
-            {
-                "name": "high_noise_model",
-                "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise_fp8.safetensors",
-                "strength": 1.0
-            },
-            {
-                "name": "low_noise_model",
-                "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise_fp8.safetensors",
-                "strength": 1.0
-            },
-            {
-                "name": "high_noise_model",
-                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-high-oral-insertion-v1.0_fp8.safetensors",
-                "strength": 1.0
-            },
-            {
-                "name": "low_noise_model",
-                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-low-oral-insertion-v1.0_fp8.safetensors",
-                "strength": 1.0
-            }
-        ],
-        [
-            {
-                "name": "high_noise_model",
-                "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise_fp8.safetensors",
-                "strength": 0.5
-            },
-            {
-                "name": "low_noise_model",
-                "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise_fp8.safetensors",
-                "strength": 0.5
-            },
-            {
-                "name": "high_noise_model",
-                "path": "models/wan2.2_models/loras/bbc_blowjob/wan22-bbcdeepthroat-115epoc-high-k3nk.safetensors",
-                "strength": 1.0
-            },
-            {
-                "name": "low_noise_model",
-                "path": "models/wan2.2_models/loras/bbc_blowjob/wan22-bbcdeepthroat-155epoc-low-720-k3nk.safetensors",
-                "strength": 1.0
-            }
-        ],
-        [
-            {
-                "name": "high_noise_model",
-                "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise_fp8.safetensors",
-                "strength": 0.5
-            },
-            {
-                "name": "low_noise_model",
-                "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise_fp8.safetensors",
-                "strength": 0.5
-            },
-        ],
-        [
-            {
-                "name": "high_noise_model",
-                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-high-oral-insertion-v1.0_fp8.safetensors",
-                "strength": 1.0
-            },
-            {
-                "name": "low_noise_model",
-                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-low-oral-insertion-v1.0_fp8.safetensors",
-                "strength": 1.0
-            }
-        ],
-        [
-            {
-                "name": "high_noise_model",
-                "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise_fp8.safetensors",
-                "strength": 0.5
-            },
-            {
-                "name": "low_noise_model",
-                "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise_fp8.safetensors",
-                "strength": 0.5
-            },
-            {
-                "name": "high_noise_model",
-                "path": "models/wan2.2_models/loras/hand_blow/WAN-2.2-I2V-HandjobBlowjobCombo-HIGH-v1.safetensors",
-                "strength": 1.0
-            },
-            {
-                "name": "low_noise_model",
-                "path": "models/wan2.2_models/loras/hand_blow/WAN-2.2-I2V-HandjobBlowjobCombo-LOW-v1.safetensors",
-                "strength": 1.0
-            }
-        ],
-        [
-            {
-                "name": "high_noise_model",
-                "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise_fp8.safetensors",
-                "strength": 0.5
-            },
-            {
-                "name": "low_noise_model",
-                "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise_fp8.safetensors",
-                "strength": 0.5
-            },
-            {
-                "name": "high_noise_model",
-                "path": "models/wan2.2_models/loras/ultimate_blow_job/wan22-ultimatedeepthroat-i2v-102epoc-high-k3nk.safetensors",
-                "strength": 1.0
-            },
-            {
-                "name": "low_noise_model",
-                "path": "models/wan2.2_models/loras/ultimate_blow_job/wan22-ultimatedeepthroat-I2V-101epoc-low-k3nk.safetensors",
-                "strength": 1.0
-            }
-        ],
-        ]
-                         
+    ],                    
 }
 # ==================================================================================
 
 def main():
     parser = argparse.ArgumentParser(description="Random search for WAN2.2 inference")
     parser.add_argument("--base_config", type=str, default="prod_configs/wan_moe_i2v_a14b_fp8.json", help="Path to base config JSON")
-    parser.add_argument("--output_dir", type=str, default="save_results/updated_configs", help="Directory to save results")
+    parser.add_argument("--output_dir", type=str, default="save_results/fp8_vs_bf16", help="Directory to save results")
     parser.add_argument("--gpu", type=str, default="0", help="GPU ID to use")
     parser.add_argument("--script_path", type=str, default="scripts/wan22/run_quality_inference.py", help="Path to inference script")
     parser.add_argument("--num_samples", type=int, default=100, help="Number of random samples to run")
@@ -336,63 +233,92 @@ def main():
             else:
                 current_config["config"][k] = v
 
-        # Define output filenames
-        video_filename = f"{idx}.mp4"
-        json_filename = f"{idx}.json"
+        # choose loras
+        loras_config = []
+        if random.randint(0, 3) > 0:
+            loras_config.append(random.choice(available_loras["base_loras"]))
+        if random.randint(0, 8) > 0:
+            for i in range(random.randint(1, 3)):
+                loras_config.append(random.choice(available_loras["blowjob_loras"]))
         
-        video_path = os.path.abspath(os.path.join(args.output_dir, video_filename))
-        json_path = os.path.abspath(os.path.join(args.output_dir, json_filename))
+        current_config["config"]["lora_configs"] = [item for sublist in loras_config for item in sublist]
         
-        # Create a temporary config file for this run
-        temp_config_path = os.path.abspath(os.path.join(args.output_dir, f"temp_config_{idx}.json"))
-        with open(temp_config_path, "w") as f:
-            json.dump(current_config, f, indent=4)
-
-        # Extract input info from config if available to pass as arguments
-        input_args = []
-        input_info_grid = current_params.get("input_info", [])
-        if "input_info" in current_config:
-            input_info = current_config["input_info"]
-            if "prompt" in input_info:
-                input_args.extend(["--prompt", str(input_info_grid["prompt"])])
-            if "image_path" in input_info:
-                input_args.extend(["--image_path", str(input_info_grid["image_path"])])
-            if "seed" in input_info:
-                input_args.extend(["--seed", str(input_info_grid["seed"])])
-
-        # Construct the command
-        cmd = [
-            sys.executable, args.script_path,
-            "--config_json", temp_config_path,
-            "--save_result_path", video_path
-        ] + input_args
-        
-        # Set environment variables (GPU)
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = args.gpu
-        
-        try:
-            print(f"Running command: {' '.join(cmd)}")
-            subprocess.run(cmd, env=env, check=True)
+        # Run for both FP8 and BF16
+        for mode in ['fp8', 'bf16']:
+            print(f"  Running {mode} pipeline...")
             
-            # Save the config used
-            save_data = {
-                "grid_parameters": current_params,
-                "full_config": current_config
-            }
-            with open(json_path, "w") as f:
-                json.dump(save_data, f, indent=4)
+            # Create mode-specific config
+            mode_config = copy.deepcopy(current_config)
+            
+            # Update checkpoints based on mode
+            if mode in available_checkpoints:
+                for k, v in available_checkpoints[mode].items():
+                    mode_config["config"][k] = v
+            
+            # Determine script path
+            if mode == 'fp8':
+                script_to_run = "scripts/wan22/run_i2v_moe_fp8.py"
+            else:
+                script_to_run = "scripts/wan22/run_i2v_moe_bf16.py"
                 
-            print(f"✓ Success! Saved video to {video_path} and config to {json_path}")
+            # Define output filenames
+            video_filename = f"{idx}_{mode}.mp4"
+            json_filename = f"{idx}_{mode}.json"
             
-        except subprocess.CalledProcessError as e:
-            print(f"✗ Error running sample {idx}: {e}")
-        except Exception as e:
-            print(f"✗ Unexpected error: {e}")
-        finally:
-            # Clean up temp config
-            if os.path.exists(temp_config_path):
-                os.remove(temp_config_path)
+            video_path = os.path.abspath(os.path.join(args.output_dir, video_filename))
+            json_path = os.path.abspath(os.path.join(args.output_dir, json_filename))
+            
+            # Create a temporary config file for this run
+            temp_config_path = os.path.abspath(os.path.join(args.output_dir, f"temp_config_{idx}_{mode}.json"))
+            with open(temp_config_path, "w") as f:
+                json.dump(mode_config, f, indent=4)
+
+            # Extract input info from config if available to pass as arguments
+            input_args = []
+            input_info_grid = current_params.get("input_info", [])
+            if "input_info" in mode_config:
+                input_info = mode_config["input_info"]
+                if "prompt" in input_info:
+                    input_args.extend(["--prompt", str(input_info_grid["prompt"])])
+                if "image_path" in input_info:
+                    input_args.extend(["--image_path", str(input_info_grid["image_path"])])
+                if "seed" in input_info:
+                    input_args.extend(["--seed", str(input_info_grid["seed"])])
+
+            # Construct the command
+            cmd = [
+                sys.executable, script_to_run,
+                "--config_json", temp_config_path,
+                "--save_result_path", video_path
+            ] + input_args
+            
+            # Set environment variables (GPU)
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = args.gpu
+            
+            try:
+                print(f"Running command: {' '.join(cmd)}")
+                subprocess.run(cmd, env=env, check=True)
+                
+                # Save the config used
+                save_data = {
+                    "grid_parameters": current_params,
+                    "full_config": mode_config,
+                    "mode": mode
+                }
+                with open(json_path, "w") as f:
+                    json.dump(save_data, f, indent=4)
+                    
+                print(f"✓ Success! Saved video to {video_path} and config to {json_path}")
+                
+            except subprocess.CalledProcessError as e:
+                print(f"✗ Error running sample {idx} mode {mode}: {e}")
+            except Exception as e:
+                print(f"✗ Unexpected error: {e}")
+            finally:
+                # Clean up temp config
+                if os.path.exists(temp_config_path):
+                    os.remove(temp_config_path)
 
 if __name__ == "__main__":
     main()

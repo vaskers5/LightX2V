@@ -69,9 +69,9 @@
         "frame_interpolation": {
             "enabled": true,
             "model_path": "models/rife/RIFEv4.26_0921/flownet.pkl",
-            "source_fps": 8.0,
-            "target_fps": 24.0,
-            "scale": 1.0
+            "source_fps": 16.0,
+            "target_fps": 32.0,
+            "scale": 2.0
         },
         "nag": {
             "enabled": true,
