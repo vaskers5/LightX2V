@@ -8,7 +8,7 @@
         "high_noise_quantized_ckpt": "models/wan2.2_models/distill_models/wan2.2_i2v_A14b_high_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
         "low_noise_quantized_ckpt": "models/wan2.2_models/distill_models/wan2.2_i2v_A14b_low_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
         "vae_path": "models/wan2.2_models/vae/Wan2.1_VAE.pth",
-        "t5_original_ckpt": "models/wan2.2_models/encoders/models_t5_umt5-xxl-enc-bf16_fully_uncensored.safetensors",
+        "t5_original_ckpt": "models/wan2.2_models/encoders/models_t5_umt5-xxl-enc-bf16.safetensors",
         "clip_original_ckpt": "models/wan2.2_models/encoders/models_clip_open-clip-xlm-roberta-large-vit-huge-14.safetensors",
         "_class_name": "WanModel",
         "_diffusers_version": "0.33.0",
@@ -43,11 +43,9 @@
         "cfg_parallel": false,
         "use_image_encoder": false,
         "attnmap_frame_num": 81,
-        "boundary": 0.5,
         "target_video_length": 81,
         "target_height": 1280,
         "target_width": 720,
-        "infer_steps": 4,
         "self_attn_1_type": "sage_attn2",
         "cross_attn_1_type": "sage_attn2",
         "cross_attn_2_type": "sage_attn2",
@@ -57,26 +55,17 @@
         "offload_granularity": "phase",
         "t5_cpu_offload": true,
         "vae_cpu_offload": true,
-        "boundary_step_index": 2,
-        "denoising_step_list_high": [
-            1000,
-            750
-        ],
-        "denoising_step_list_low": [
-            500,
-            250
-        ],
-        "denoising_step_list": [
-            1000,
-            750,
-            500,
-            250
-        ],
+        "denoising_steps": {
+            "steps": 4,
+            "boundary": 0.5
+        },
         "dit_quantized": true,
         "dit_quant_scheme": "fp8-sgl",
         "t5_quantized": false,
-        "motion_amplitude": 1.15,
-        "enable_motion_enhancement": true,
+        "motion_enhancement": {
+            "enabled": true,
+            "amplitude": 1.15
+        },
         "frame_interpolation": {
             "enabled": true,
             "model_path": "models/rife/RIFEv4.26_0921/flownet.pkl",
@@ -94,27 +83,30 @@
         "lora_configs": [
             {
                 "name": "high_noise_model",
-                "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise.safetensors",
+                "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise_fp8.safetensors",
                 "strength": 1.0
             },
             {
                 "name": "low_noise_model",
-                "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise.safetensors",
+                "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise_fp8.safetensors",
                 "strength": 1.0
             },
             {
                 "name": "high_noise_model",
-                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-high-oral-insertion-v1.0_normalized.safetensors",
+                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-high-oral-insertion-v1.0_fp8.safetensors",
                 "strength": 1.0
             },
             {
                 "name": "low_noise_model",
-                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-low-oral-insertion-v1.0_normalized.safetensors",
+                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-low-oral-insertion-v1.0_fp8.safetensors",
                 "strength": 1.0
             }
         ]
     },
     "input_info": {
+        "prompt": "A man appears and she sucks his penis",
+        "image_path": "assets/inputs/imgs/pron_test.png",
+        "seed": 42,
         "negative_prompt": "bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards, flicker, flickering, jitter, text, text overlays, watermark, logo, heavy blur, motion blur, double faces, bad anatomy, bad proportions, noise, grainy, glitch"
     }
 }

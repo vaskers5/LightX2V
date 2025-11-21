@@ -43,11 +43,9 @@
     "cfg_parallel": false,
     "use_image_encoder": false,
     "attnmap_frame_num": 121,
-    "boundary": 0.5,
     "target_video_length": 121,
     "target_height": 720,
     "target_width": 1280,
-    "infer_steps": 4,
     "self_attn_1_type": "sage_attn2",
     "cross_attn_1_type": "sage_attn2",
     "cross_attn_2_type": "sage_attn2",
@@ -59,23 +57,14 @@
     "offload_granularity": "phase",
     "t5_cpu_offload": false,
     "vae_cpu_offload": false,
-    "boundary_step_index": 2,
-    "denoising_step_list_high": [
-    1000,
-    750
-    ],
-    "denoising_step_list_low": [
-    500,
-    250
-    ],
-    "denoising_step_list": [
-    1000,
-    750,
-    500,
-    250
-    ],
-    "motion_amplitude": 1.15,
-    "enable_motion_enhancement": true,
+    "denoising_steps": {
+        "steps": 4,
+        "boundary": 0.5
+    },
+    "motion_enhancement": {
+        "enabled": true,
+        "amplitude": 1.15
+    },
     "lora_configs": [
         {
             "name": "high_noise_model",

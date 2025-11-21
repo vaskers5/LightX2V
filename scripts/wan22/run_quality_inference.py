@@ -241,7 +241,7 @@ import gc
 import json
 import os
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -252,7 +252,6 @@ from loguru import logger
 from safetensors import safe_open
 from torch.distributed.tensor.device_mesh import init_device_mesh
 
-from lightx2v.common.offload.manager import WeightAsyncStreamManager
 from lightx2v.models.networks.wan.distill_model import WanDistillModel
 from lightx2v.models.networks.wan.model import WanModel
 from lightx2v.models.runners.wan.wan_distill_runner import MultiDistillModelStruct, Wan22MoeDistillRunner
@@ -260,6 +259,62 @@ from lightx2v.utils.envs import *
 from lightx2v.utils.input_info import ALL_INPUT_INFO_KEYS, set_input_info
 from lightx2v.utils.lockable_dict import LockableDict
 from lightx2v.utils.utils import seed_all
+
+
+class WeightAsyncStreamManager(object):
+    def __init__(self, offload_granularity):
+        self.offload_granularity = offload_granularity
+        self.init_stream = torch.cuda.Stream(priority=0)
+        self.cuda_load_stream = torch.cuda.Stream(priority=0)
+        self.compute_stream = torch.cuda.Stream(priority=-1)
+
+    def init_cuda_buffer(self, blocks_cuda_buffer=None, phases_cuda_buffer=None):
+        if self.offload_granularity == "block":
+            assert blocks_cuda_buffer is not None
+            self.cuda_buffers = [blocks_cuda_buffer[i] for i in range(len(blocks_cuda_buffer))]
+        elif self.offload_granularity == "phase":
+            assert phases_cuda_buffer is not None
+            self.cuda_buffers = [phases_cuda_buffer[i] for i in range(len(phases_cuda_buffer))]
+        else:
+            raise NotImplementedError
+
+    def init_first_buffer(self, blocks, adapter_block_idx=None):
+        if self.offload_granularity == "block":
+            with torch.cuda.stream(self.init_stream):
+                self.cuda_buffers[0].load_state_dict(blocks[0].state_dict(), 0, adapter_block_idx)
+        else:
+            with torch.cuda.stream(self.init_stream):
+                self.cuda_buffers[0].load_state_dict(blocks[0].compute_phases[0].state_dict(), 0, adapter_block_idx)
+        self.init_stream.synchronize()
+
+    def prefetch_weights(self, block_idx, blocks, adapter_block_idx=None):
+        with torch.cuda.stream(self.cuda_load_stream):
+            self.cuda_buffers[1].load_state_dict(blocks[block_idx].state_dict(), block_idx, adapter_block_idx)
+
+    def swap_blocks(self):
+        self.cuda_load_stream.synchronize()
+        self.compute_stream.synchronize()
+        self.cuda_buffers[0], self.cuda_buffers[1] = (
+            self.cuda_buffers[1],
+            self.cuda_buffers[0],
+        )
+
+    def swap_weights(self):
+        """Unified API for swapping buffers during weight offload."""
+        if self.offload_granularity == "block":
+            self.swap_blocks()
+        elif self.offload_granularity == "phase":
+            self.swap_phases()
+        else:
+            raise NotImplementedError(f"Unsupported granularity: {self.offload_granularity}")
+
+    def prefetch_phase(self, block_idx, phase_idx, blocks, adapter_block_idx=None):
+        with torch.cuda.stream(self.cuda_load_stream):
+            self.cuda_buffers[phase_idx].load_state_dict(blocks[block_idx].compute_phases[phase_idx].state_dict(), block_idx, adapter_block_idx)
+
+    def swap_phases(self):
+        self.cuda_load_stream.synchronize()
+        self.compute_stream.synchronize()
 
 
 def get_default_config():
@@ -1313,42 +1368,62 @@ class WanLoraCustomWrapper:
 
     @torch.no_grad()
     def _apply_lora_weights(self, weight_dict, lora_weights, alpha):
-        lora_pairs = {}
-        lora_diffs = {}
+        import re
+        
+        def normalize_key(key):
+            # 1. Handle prefixes
+            # Strip diffusion_model. if present
+            if key.startswith("diffusion_model."):
+                key = key[len("diffusion_model."):]
+            # Handle lora_unet_ prefix -> blocks.
+            elif key.startswith("lora_unet_"):
+                key = key.replace("lora_unet_", "blocks.")
+            
+            # 2. Strip LoRA suffixes
+            # Matches .lora_down, .lora_up, .alpha, .lora_A, .lora_B, etc.
+            # Also handles .weight at the end of these
+            key = re.sub(r"\.(?:lora_(?:down|up|A|B)|alpha)(?:\.weight)?$", "", key)
+            
+            # 3. Strip .weight from model keys (for the model side)
+            if key.endswith(".weight"):
+                key = key[:-7]
+                
+            return key
 
-        def try_lora_pair(key, prefix, suffix_a, suffix_b, target_suffix):
-            if key.endswith(suffix_a):
-                base_name = key[len(prefix) :].replace(suffix_a, target_suffix)
-                pair_key = key.replace(suffix_a, suffix_b)
-                if pair_key in lora_weights:
-                    lora_pairs[base_name] = (key, pair_key)
+        # Create map of canonical model keys to actual model keys
+        model_canonical_map = {}
+        for k in weight_dict.keys():
+            canon = normalize_key(k)
+            model_canonical_map[canon] = k
 
-        def try_lora_diff(key, prefix, suffix, target_suffix):
-            if key.endswith(suffix):
-                base_name = key[len(prefix) :].replace(suffix, target_suffix)
-                lora_diffs[base_name] = key
-
-        prefixs = [
-            "",  # empty prefix
-            "diffusion_model.",
-        ]
-        for prefix in prefixs:
-            for key in lora_weights.keys():
-                if not key.startswith(prefix):
-                    continue
-
-                try_lora_pair(key, prefix, "lora_A.weight", "lora_B.weight", "weight")
-                try_lora_pair(key, prefix, "lora_down.weight", "lora_up.weight", "weight")
-                try_lora_diff(key, prefix, "diff", "weight")
-                try_lora_diff(key, prefix, "diff_b", "bias")
-                try_lora_diff(key, prefix, "diff_m", "modulation")
+        # Group LoRA weights by base name
+        lora_groups = {}
+        for key, tensor in lora_weights.items():
+            canon = normalize_key(key)
+            if canon not in lora_groups:
+                lora_groups[canon] = {}
+            
+            if "lora_down" in key or "lora_A" in key:
+                lora_groups[canon]["down"] = tensor
+            elif "lora_up" in key or "lora_B" in key:
+                lora_groups[canon]["up"] = tensor
+            elif "alpha" in key:
+                lora_groups[canon]["alpha"] = tensor
 
         applied_count = 0
-        for name, param in weight_dict.items():
-            if name in lora_pairs:
-                if name not in self.override_dict:
-                    self.override_dict[name] = param.clone().cpu()
-                name_lora_A, name_lora_B = lora_pairs[name]
+        
+        for canon, groups in lora_groups.items():
+            target_key = model_canonical_map.get(canon)
+            if not target_key:
+                continue
+            
+            # Check if we have a valid LoRA pair
+            if "down" in groups and "up" in groups:
+                # Save original weight for restoration
+                if target_key not in self.override_dict:
+                    self.override_dict[target_key] = weight_dict[target_key].clone().cpu()
+                
+                param = weight_dict[target_key]
                 
                 # Handle FP8 weights: convert to bfloat16, apply LoRA, convert back
                 is_fp8 = param.dtype == torch.float8_e4m3fn
@@ -1356,36 +1431,46 @@ class WanLoraCustomWrapper:
                 if is_fp8:
                     param.data = param.data.to(torch.bfloat16)
                 
-                lora_A = lora_weights[name_lora_A].to(param.device, param.dtype)
-                lora_B = lora_weights[name_lora_B].to(param.device, param.dtype)
-                if param.shape == (lora_B.shape[0], lora_A.shape[1]):
-                    param += torch.matmul(lora_B, lora_A) * alpha
-                    applied_count += 1
+                down = groups["down"].to(param.device, param.dtype)
+                up = groups["up"].to(param.device, param.dtype)
+                
+                # Calculate scale
+                current_alpha = alpha
+                if "alpha" in groups:
+                    lora_alpha_tensor = groups["alpha"]
+                    lora_alpha_val = lora_alpha_tensor.item() if lora_alpha_tensor.numel() == 1 else lora_alpha_tensor[0].item()
+                    rank = down.shape[0] 
+                    current_alpha *= (lora_alpha_val / rank)
+                
+                # Compute update
+                # param: [out, in]
+                # down: [r, in], up: [out, r] -> up @ down = [out, in]
+                
+                if param.shape == (up.shape[0], down.shape[1]):
+                     update = torch.matmul(up, down) * current_alpha
+                     param.data += update
+                     applied_count += 1
+                elif param.dim() == 4 and down.dim() == 4 and up.dim() == 4:
+                     # Conv2d case
+                     # down: [r, in, k, k], up: [out, r, 1, 1]
+                     # Squeeze if 1x1
+                     if down.shape[-2:] == (1, 1) and up.shape[-2:] == (1, 1):
+                         d_s = down.squeeze(-1).squeeze(-1)
+                         u_s = up.squeeze(-1).squeeze(-1)
+                         update = torch.matmul(u_s, d_s) * current_alpha
+                         update = update.unsqueeze(-1).unsqueeze(-1)
+                         if param.shape == update.shape:
+                             param.data += update
+                             applied_count += 1
                 
                 # Convert back to FP8 if needed
                 if is_fp8:
                     param.data = param.data.to(original_dtype)
-            elif name in lora_diffs:
-                if name not in self.override_dict:
-                    self.override_dict[name] = param.clone().cpu()
-
-                name_diff = lora_diffs[name]
-                
-                # Handle FP8 weights
-                is_fp8 = param.dtype == torch.float8_e4m3fn
-                original_dtype = param.dtype
-                if is_fp8:
-                    param.data = param.data.to(torch.bfloat16)
-                
-                lora_diff = lora_weights[name_diff].to(param.device, param.dtype)
-                if param.shape == lora_diff.shape:
-                    param += lora_diff * alpha
-                    applied_count += 1
 
         logger.info(f"Applied {applied_count} LoRA weight adjustments")
         if applied_count == 0:
             logger.info(
-                "Warning: No LoRA weights were applied. Expected naming conventions: 'diffusion_model.<layer_name>.lora_A.weight' and 'diffusion_model.<layer_name>.lora_B.weight'. Please verify the LoRA weight file."
+                "Warning: No LoRA weights were applied. Please verify the LoRA weight file and naming conventions."
             )
 
     @torch.no_grad()
@@ -1434,10 +1519,10 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
     - Neither: Uses WanDistillModel (full precision)
     
     Motion Enhancement:
-    - Enabled by default for 4-step distilled models (motion_amplitude=1.15)
+    - Enabled by default for 4-step distilled models (amplitude=1.15)
     - Amplifies motion while preserving brightness
     - Prevents the "slow-motion" effect common in fast distilled inference
-    - Can be disabled via config: "motion_amplitude": 1.0 or "enable_motion_enhancement": false
+    - Can be disabled via config: "motion_enhancement": {"enabled": false}
     
     NAG (Normalized Attention Guidance):
     - Optional attention normalization for improved quality
@@ -1454,11 +1539,63 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
         Args:
             config: Configuration dictionary containing model paths, hyperparameters, etc.
         """
+        # Pre-process config to handle new 'denoising_steps' block
+        if "denoising_steps" in config:
+            steps_config = config["denoising_steps"]
+            
+            # Check if we need to calculate steps automatically
+            if "steps" in steps_config and "boundary" in steps_config:
+                steps = steps_config["steps"]
+                boundary = steps_config["boundary"]
+                
+                # Calculate boundary step index
+                boundary_step_index = int(steps * boundary)
+                
+                # Generate step lists
+                # Standard WAN scheduler logic: 1000 -> 0
+                num_train_timesteps = 1000
+                step_size = num_train_timesteps // steps
+                
+                # Generate all steps: [1000, 750, 500, 250] for 4 steps
+                all_steps = [num_train_timesteps - i * step_size for i in range(steps)]
+                
+                # Split into high and low noise lists
+                high_steps = all_steps[:boundary_step_index]
+                low_steps = all_steps[boundary_step_index:]
+                
+                # Update config
+                config["denoising_step_list_high"] = high_steps
+                config["denoising_step_list_low"] = low_steps
+                config["denoising_step_list"] = all_steps
+                config["boundary_step_index"] = boundary_step_index
+                config["infer_steps"] = steps
+                config["boundary"] = boundary
+                
+                logger.info(f"Auto-calculated denoising steps: {steps} steps, boundary {boundary}")
+                logger.info(f"  High noise steps: {high_steps}")
+                logger.info(f"  Low noise steps: {low_steps}")
+            else:
+                # Legacy/Manual mode: use provided lists
+                if "high" in steps_config:
+                    config["denoising_step_list_high"] = steps_config["high"]
+                if "low" in steps_config:
+                    config["denoising_step_list_low"] = steps_config["low"]
+                if "list" in steps_config:
+                    config["denoising_step_list"] = steps_config["list"]
+                if "boundary_step_index" in steps_config:
+                    config["boundary_step_index"] = steps_config["boundary_step_index"]
+                
         super().__init__(config)
         
         # Initialize motion amplitude processor
-        motion_amplitude = self.config.get("motion_amplitude", 1.15)
-        enable_motion = self.config.get("enable_motion_enhancement", True)
+        if "motion_enhancement" in self.config:
+            motion_config = self.config["motion_enhancement"]
+            motion_amplitude = motion_config.get("amplitude", 1.15)
+            enable_motion = motion_config.get("enabled", True)
+        else:
+            motion_amplitude = self.config.get("motion_amplitude", 1.15)
+            enable_motion = self.config.get("enable_motion_enhancement", True)
+
         self.motion_processor = MotionAmplitudeProcessor(
             motion_amplitude=motion_amplitude,
             enable=enable_motion
