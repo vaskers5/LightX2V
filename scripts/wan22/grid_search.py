@@ -10,12 +10,7 @@ import sys
 Grid search / Random search script for WAN2.2 inference optimization.
 """
 
-BASE_PROMPT = """Sultry beach blowjob at sunset: Blonde beauty in lace bikini kneels, lips parting eagerly for dark man's thick ebony cock, eyes locked in lust. Waves crash; she sucks deep, hands gripping thighs. Warm tones, soft side light, low contrast.
-Medium close-up, low-angle handheld pan left-right, zoom on suck, upward tilt. Realistic style.
-5s breakdown:
-1 (0-1.5s): Approach—cock nears lips, tease; tilt right.
-2 (1.5-3.5s): Suck—engulfs, tongue swirl; zoom close, pan left.
-3 (3.5-5s): Deep—bob rhythm, pull; surround up to wide reveal."""
+BASE_PROMPT = """a  woman in front of a penis, she engages in a deep throat blowjob, she swallows the penis all the way. Her lips touches the man's groin. Her nose smashes against the man's hips."""
 
 NEGATIVE_PROMPT = """bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards, flicker, flickering, jitter, text, text overlays, watermark, logo, heavy blur, motion blur, double faces, bad anatomy, bad proportions, noise, grainy, glitch"""
 IMG_LIST = [
@@ -23,6 +18,96 @@ IMG_LIST = [
     "assets/inputs/imgs/photo-1761755371106.jpeg",
     "assets/inputs/imgs/photo-1761755380708.jpeg",
 ]
+
+available_loras = {
+    "base_loras":
+        [
+            [{
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise_fp8.safetensors",
+                "strength": 1.0
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise_fp8.safetensors",
+                "strength": 1.0
+            },],
+        ],
+    "blowjob_loras":[
+            [
+        {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/bbc_blowjob/wan22-bbcdeepthroat-115epoc-high-k3nk.safetensors",
+                "strength": 1.0
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/bbc_blowjob/wan22-bbcdeepthroat-155epoc-low-720-k3nk.safetensors",
+                "strength": 1.0
+            }
+        ],
+        [
+            {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-high-oral-insertion-v1.0_fp8.safetensors",
+                "strength": 1.0
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-low-oral-insertion-v1.0_fp8.safetensors",
+                "strength": 1.0
+            }
+        ],
+        [
+            {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/hand_blow/WAN-2.2-I2V-HandjobBlowjobCombo-HIGH-v1.safetensors",
+                "strength": 1.0
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/hand_blow/WAN-2.2-I2V-HandjobBlowjobCombo-LOW-v1.safetensors",
+                "strength": 1.0
+            }
+        ],
+        [
+        {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/ultimate_blow_job/wan22-ultimatedeepthroat-i2v-102epoc-high-k3nk.safetensors",
+                "strength": 1.0
+        },
+        {
+            "name": "low_noise_model",
+            "path": "models/wan2.2_models/loras/ultimate_blow_job/wan22-ultimatedeepthroat-I2V-101epoc-low-k3nk.safetensors",
+            "strength": 1.0
+        }
+        ],
+        [
+        {
+            "name": "high_noise_model",
+            "path": "models/wan2.2_models/loras/ultimate_blow_job/Wan22_ThroatV2_High.safetensors",
+            "strength": 1.0
+        },
+        {
+            "name": "low_noise_model",
+            "path": "models/wan2.2_models/loras/ultimate_blow_job/Wan22_ThroatV2_Low.safetensors",
+            "strength": 1.0
+        } 
+        ]
+        # [
+        # {
+        #     "name": "high_noise_model",
+        #     "path": "models/wan2.2_models/loras/penis_play/Wan22_ThroatV2_High.safetensors",
+        #     "strength": 1.0
+        # },
+        # {
+        #     "name": "low_noise_model",
+        #     "path": "models/wan2.2_models/loras/penis_play/Wan22_ThroatV2_Low.safetensors",
+        #     "strength": 1.0
+        # } 
+        # ],
+}
+                
 
 # ==================================================================================
 # SEARCH CONFIGURATION
@@ -56,8 +141,9 @@ GRID = {
     "scheduler_type": ["EulerScheduler"],
     "nag": [
         {"enabled": False},
-        {"enabled": True, "scale": 1.5, "tau": 2.5, "alpha": 0.25},
-        {"enabled": True, "scale": 2.0, "tau": 2.5, "alpha": 0.25},
+        {"enabled": True, "scale": 1.5, "tau": 2.5, "alpha": 0.25, "negative_prompt": NEGATIVE_PROMPT},
+        {"enabled": True, "scale": 2.0, "tau": 2.5, "alpha": 0.25, "negative_prompt": NEGATIVE_PROMPT}, 
+        {"enabled": True, "scale": 2.5, "tau": 2.5, "alpha": 0.25, "negative_prompt": NEGATIVE_PROMPT},
     ],
     # Special key for resolution (height, width) to ensure valid aspect ratios
     "resolution": [
@@ -80,14 +166,129 @@ GRID = {
         {"prompt": BASE_PROMPT, "image_path": IMG_LIST[2], "seed": 42, "negative_prompt": ""},
 
     ],
+        "lora_configs": [
+        [
+            {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise_fp8.safetensors",
+                "strength": 1.0
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise_fp8.safetensors",
+                "strength": 1.0
+            },
+            {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-high-oral-insertion-v1.0_fp8.safetensors",
+                "strength": 1.0
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-low-oral-insertion-v1.0_fp8.safetensors",
+                "strength": 1.0
+            }
+        ],
+        [
+            {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise_fp8.safetensors",
+                "strength": 0.5
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise_fp8.safetensors",
+                "strength": 0.5
+            },
+            {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/bbc_blowjob/wan22-bbcdeepthroat-115epoc-high-k3nk.safetensors",
+                "strength": 1.0
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/bbc_blowjob/wan22-bbcdeepthroat-155epoc-low-720-k3nk.safetensors",
+                "strength": 1.0
+            }
+        ],
+        [
+            {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise_fp8.safetensors",
+                "strength": 0.5
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise_fp8.safetensors",
+                "strength": 0.5
+            },
+        ],
+        [
+            {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-high-oral-insertion-v1.0_fp8.safetensors",
+                "strength": 1.0
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/oral_insertion/wan2.2-i2v-low-oral-insertion-v1.0_fp8.safetensors",
+                "strength": 1.0
+            }
+        ],
+        [
+            {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise_fp8.safetensors",
+                "strength": 0.5
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise_fp8.safetensors",
+                "strength": 0.5
+            },
+            {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/hand_blow/WAN-2.2-I2V-HandjobBlowjobCombo-HIGH-v1.safetensors",
+                "strength": 1.0
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/hand_blow/WAN-2.2-I2V-HandjobBlowjobCombo-LOW-v1.safetensors",
+                "strength": 1.0
+            }
+        ],
+        [
+            {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise_fp8.safetensors",
+                "strength": 0.5
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise_fp8.safetensors",
+                "strength": 0.5
+            },
+            {
+                "name": "high_noise_model",
+                "path": "models/wan2.2_models/loras/ultimate_blow_job/wan22-ultimatedeepthroat-i2v-102epoc-high-k3nk.safetensors",
+                "strength": 1.0
+            },
+            {
+                "name": "low_noise_model",
+                "path": "models/wan2.2_models/loras/ultimate_blow_job/wan22-ultimatedeepthroat-I2V-101epoc-low-k3nk.safetensors",
+                "strength": 1.0
+            }
+        ],
+        ]
+                         
 }
 # ==================================================================================
 
 def main():
     parser = argparse.ArgumentParser(description="Random search for WAN2.2 inference")
     parser.add_argument("--base_config", type=str, default="prod_configs/wan_moe_i2v_a14b_fp8.json", help="Path to base config JSON")
-    parser.add_argument("--output_dir", type=str, default="save_results/force_configs", help="Directory to save results")
-    parser.add_argument("--gpu", type=str, default="5", help="GPU ID to use")
+    parser.add_argument("--output_dir", type=str, default="save_results/updated_configs", help="Directory to save results")
+    parser.add_argument("--gpu", type=str, default="0", help="GPU ID to use")
     parser.add_argument("--script_path", type=str, default="scripts/wan22/run_quality_inference.py", help="Path to inference script")
     parser.add_argument("--num_samples", type=int, default=100, help="Number of random samples to run")
     args = parser.parse_args()
@@ -149,14 +350,15 @@ def main():
 
         # Extract input info from config if available to pass as arguments
         input_args = []
+        input_info_grid = current_params.get("input_info", [])
         if "input_info" in current_config:
             input_info = current_config["input_info"]
             if "prompt" in input_info:
-                input_args.extend(["--prompt", str(input_info["prompt"])])
+                input_args.extend(["--prompt", str(input_info_grid["prompt"])])
             if "image_path" in input_info:
-                input_args.extend(["--image_path", str(input_info["image_path"])])
+                input_args.extend(["--image_path", str(input_info_grid["image_path"])])
             if "seed" in input_info:
-                input_args.extend(["--seed", str(input_info["seed"])])
+                input_args.extend(["--seed", str(input_info_grid["seed"])])
 
         # Construct the command
         cmd = [
