@@ -27,10 +27,13 @@ from lightx2v.models.networks.wan.distill_model import WanDistillModel
 from lightx2v.models.networks.wan.model import WanModel
 from lightx2v.models.runners.wan.wan_distill_runner import MultiDistillModelStruct, Wan22MoeDistillRunner
 from lightx2v.utils.envs import *
+from lightx2v.utils.utils import seed_all, save_to_video
 from lightx2v.utils.input_info import ALL_INPUT_INFO_KEYS, set_input_info
+from lightx2v.utils.profiler import ProfilingContext4DebugL1
+from lightx2v.common.ops.mm.mm_weight import MMWeight, MM_WEIGHT_REGISTER
 from lightx2v.utils.lora_quant import load_lora_safetensors
+from lightx2v.utils.quant_utils import FloatQuantizer
 from lightx2v.utils.lockable_dict import LockableDict
-from lightx2v.utils.utils import seed_all
 
 FP8_MAX_VALUE = 448.0
 
@@ -933,9 +936,40 @@ class WanLoraCustomWrapper:
         del lora_weights
         return True
 
+    def _collect_weight_modules(self, root_module):
+        modules = {}
+        
+        def recursive_collect(module):
+            if hasattr(module, "weight_name"):
+                modules[module.weight_name] = module
+            
+            # Check for _modules (WeightModule)
+            if hasattr(module, "_modules"):
+                for child in module._modules.values():
+                    if child is not None:
+                        recursive_collect(child)
+            
+            # Check for _parameters (WeightModule)
+            if hasattr(module, "_parameters"):
+                for child in module._parameters.values():
+                    if child is not None:
+                        recursive_collect(child)
+
+        recursive_collect(root_module)
+        return modules
+
     @torch.no_grad()
     def _apply_lora_weights(self, weight_dict, lora_weights, alpha):
         model_canonical_map = self._get_model_canonical_map(weight_dict)
+
+        # Build wrapper map for sidecar LoRA
+        wrapper_map = {}
+        if hasattr(self.model, "transformer_weights"):
+             wrapper_map.update(self._collect_weight_modules(self.model.transformer_weights))
+        if hasattr(self.model, "pre_weight"):
+             wrapper_map.update(self._collect_weight_modules(self.model.pre_weight))
+        if hasattr(self.model, "post_weight"):
+             wrapper_map.update(self._collect_weight_modules(self.model.post_weight))
 
         group_cache_key = id(lora_weights)
         if group_cache_key in self._lora_group_cache:
@@ -956,6 +990,7 @@ class WanLoraCustomWrapper:
             self._lora_group_cache[group_cache_key] = lora_groups
 
         applied_count = 0
+        modified_keys = set();
         
         for canon, groups in lora_groups.items():
             target_key = model_canonical_map.get(canon)
@@ -963,14 +998,37 @@ class WanLoraCustomWrapper:
                 continue
             
             if "down" in groups and "up" in groups:
-                # Memory optimization: Don't save original weights since we don't unload LoRAs in this script
-                # if target_key not in self.override_dict:
-                #     self.override_dict[target_key] = weight_dict[target_key].clone().cpu()
-                
                 param = weight_dict[target_key]
                 original_device = param.device
                 is_fp8 = param.dtype == torch.float8_e4m3fn
                 original_dtype = param.dtype
+
+                down = groups["down"]
+                up = groups["up"]
+                
+                current_alpha = alpha
+                if "alpha" in groups:
+                    lora_alpha_tensor = groups["alpha"]
+                    lora_alpha_val = lora_alpha_tensor.item() if lora_alpha_tensor.numel() == 1 else lora_alpha_tensor[0].item()
+                    rank = down.shape[0] 
+                    current_alpha *= (lora_alpha_val / rank)
+
+                # Sidecar LoRA for FP8
+                if is_fp8 and target_key in wrapper_map:
+                    wrapper = wrapper_map[target_key]
+                    if hasattr(wrapper, "add_lora"):
+                        # Use param.device as the target device since wrapper.weight might not be set yet
+                        target_device = param.device
+                        # Keep in BF16/FP32
+                        down_t = down.to(target_device)
+                        up_t = up.to(target_device)
+                        
+                        wrapper.add_lora(down_t, up_t, current_alpha)
+                        
+                        if applied_count < 5:
+                            logger.info(f"Added Sidecar LoRA to {target_key} (alpha={current_alpha})")
+                        applied_count += 1
+                        continue
 
                 scale_tensor = None
                 scale_view = None
@@ -1019,12 +1077,7 @@ class WanLoraCustomWrapper:
                 down = groups["down"].to(target_device, param_data.dtype)
                 up = groups["up"].to(target_device, param_data.dtype)
                 
-                current_alpha = alpha
-                if "alpha" in groups:
-                    lora_alpha_tensor = groups["alpha"]
-                    lora_alpha_val = lora_alpha_tensor.item() if lora_alpha_tensor.numel() == 1 else lora_alpha_tensor[0].item()
-                    rank = down.shape[0] 
-                    current_alpha *= (lora_alpha_val / rank)
+                # Alpha already calculated above
                 
                 if param.shape == (up.shape[0], down.shape[1]):
                     # Debugging: Check norms
@@ -1034,8 +1087,11 @@ class WanLoraCustomWrapper:
                     
                     if applied_count < 5: # Log first few updates
                         logger.info(f"Applying LoRA to {target_key}: Pre-norm={pre_norm:.4f}, Post-norm={post_norm:.4f}, Alpha={current_alpha}")
+                        logger.info(f"  Param shape: {param.shape}")
                         if quantized_mode:
-                             logger.info(f"  Scale before: {scale_view.mean().item():.6f}")
+                             logger.info(f"  Scale shape: {scale_view.shape}")
+                             logger.info(f"  Scale mean: {scale_view.mean().item():.6f}")
+                             logger.info(f"  De-quantized stats: Mean={param_data.mean().item():.6f}, Std={param_data.std().item():.6f}, Min={param_data.min().item():.6f}, Max={param_data.max().item():.6f}")
                     
                     applied_count += 1
                 elif param.dim() == 4 and down.dim() == 4 and up.dim() == 4:
@@ -1058,36 +1114,36 @@ class WanLoraCustomWrapper:
                 if 'update' in locals():
                     del update
 
-                if quantized_mode and scale_view is not None:
-                    if scale_view.device != param_data.device:
-                        scale_view = scale_view.to(param_data.device)
+                if quantized_mode:
+                    # Force FP8 re-quantization (Hard FP8)
+                    # We re-quantize the LoRA-adapted weights back to FP8 to use the FP8 kernel.
+                    # This avoids the noise issue caused by mixing kernels.
                     
-                    # Recalculate scale to avoid clipping if the weights grew
-                    # We need to update the original scale tensor in weight_dict so subsequent LoRAs see the correct scale
-                    if scale_tensor is not None:
-                        # Calculate new max per channel (or per tensor depending on scale shape)
-                        if scale_view.numel() == 1:
-                            new_max = param_data.abs().max()
-                            new_scale = torch.clamp(new_max / FP8_MAX_VALUE, min=1e-6)
-                            scale_tensor.copy_(new_scale.view(scale_tensor.shape))
-                            scale_view = reshape_scale_for_param(scale_tensor.to(param_data.device, dtype=torch.float32), param.shape)
-                        elif scale_view.numel() == param_data.shape[0]:
-                            # Per-channel scaling (dim 0)
-                            new_max = param_data.abs().amax(dim=tuple(range(1, param_data.ndim)), keepdim=True)
-                            new_scale = torch.clamp(new_max / FP8_MAX_VALUE, min=1e-6)
-                            # Update the source scale tensor
-                            scale_tensor.copy_(new_scale.view(scale_tensor.shape))
-                            scale_view = reshape_scale_for_param(scale_tensor.to(param_data.device, dtype=torch.float32), param.shape)
+                    # Ensure param_data is on CUDA for FloatQuantizer
+                    if param_data.device.type != "cuda":
+                        param_data = param_data.cuda()
                         
-                        if applied_count < 5:
-                             logger.info(f"  Scale after: {scale_view.mean().item():.6f}")
-
-                    quantized = torch.clamp(param_data / scale_view, min=-FP8_MAX_VALUE, max=FP8_MAX_VALUE)
-                    updated_tensor = quantized.to(torch.float8_e4m3fn)
+                    quantizer = FloatQuantizer("e4m3", True, "per_channel")
+                    # real_quant_tensor returns (quantized_weight_simulated, scale, zeros)
+                    new_weight_sim, new_scale, _ = quantizer.real_quant_tensor(param_data)
+                    
+                    # Cast to actual FP8 dtype
+                    new_weight_fp8 = new_weight_sim.to(torch.float8_e4m3fn)
+                    new_scale = new_scale.to(torch.float32)
+                    
+                    # Update weight_dict
+                    weight_dict[target_key] = new_weight_fp8.to(original_device)
+                    weight_dict[scale_key] = new_scale.to(original_device)
+                    
+                    # Update param.data
+                    param.data = new_weight_fp8.to(original_device)
+                    
+                    # Mark for wrapper update
+                    modified_keys.add(target_key)
+                    
                 else:
                     updated_tensor = param_data.to(original_dtype)
-
-                param.data.copy_(updated_tensor.to(original_device, non_blocking=True))
+                    param.data = updated_tensor.to(original_device, non_blocking=True)
 
                 del param_data
 
@@ -1096,21 +1152,9 @@ class WanLoraCustomWrapper:
             logger.info(
                 "Warning: No LoRA weights were applied. Please verify the LoRA weight file and naming conventions."
             )
-
-    @torch.no_grad()
-    def remove_lora(self):
-        logger.info(f"Removing LoRA ...")
-
-        restored_count = 0
-        for k, v in self.override_dict.items():
-            self.model.original_weight_dict[k] = v.to(self.model.device)
-            restored_count += 1
-
-        logger.info(f"LoRA removed, restored {restored_count} weights")
-
-        self.model._apply_weights(self.model.original_weight_dict)
-
-        torch.cuda.empty_cache()
+        
+        if modified_keys:
+            self._update_wrappers(modified_keys)
         gc.collect()
 
         self.lora_metadata = {}
@@ -1118,6 +1162,51 @@ class WanLoraCustomWrapper:
 
     def list_loaded_loras(self):
         return list(self.lora_metadata.keys())
+
+    def _update_wrappers(self, modified_keys):
+        """
+        Recursively traverse the model and update wrappers with new weights.
+        For FP8 wrappers, updates weight and scale.
+        """
+        if not modified_keys:
+            return
+
+        logger.info(f"Updating {len(modified_keys)} wrappers with new weights...")
+        
+        def recursive_update(module):
+            if not hasattr(module, "_modules"):
+                return
+            
+            for name, child in list(module._modules.items()):
+                if hasattr(child, "weight_name") and child.weight_name in modified_keys:
+                    # Found a wrapper to update
+                    
+                    # Get new weight and scale from weight_dict
+                    if child.weight_name in self.model.original_weight_dict:
+                        new_weight = self.model.original_weight_dict[child.weight_name]
+                        
+                        # Handle transposition
+                        if hasattr(child, "weight_need_transpose") and child.weight_need_transpose:
+                            new_weight = new_weight.t()
+                        
+                        # Update weight
+                        if hasattr(child, "weight"):
+                            child.weight = new_weight.to(child.weight.device)
+                        
+                        # Update scale if it exists
+                        if hasattr(child, "weight_scale_name"):
+                            scale_key = child.weight_scale_name
+                            if scale_key in self.model.original_weight_dict:
+                                new_scale = self.model.original_weight_dict[scale_key]
+                                if hasattr(child, "weight_scale"):
+                                    child.weight_scale = new_scale.to(child.weight_scale.device)
+                        
+                        logger.info(f"Updated wrapper for {child.weight_name}")
+                
+                recursive_update(child)
+
+        if hasattr(self.model, "transformer_weights"):
+            recursive_update(self.model.transformer_weights)
 
 
 class CustomMultiDistillModelStruct(MultiDistillModelStruct):
@@ -1644,6 +1733,28 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
         logger.info("✓ Memory cleanup complete")
         self.profiler.log_usage("After Cleanup")
 
+    def load_vfi_model(self):
+        # Check for frame_interpolation key (used in this custom runner)
+        vfi_config = self.config.get("frame_interpolation", {})
+        if not vfi_config:
+             # Fallback to default key if present
+             vfi_config = self.config.get("video_frame_interpolation", {})
+        
+        if not vfi_config:
+            return None
+
+        # Default to rife if enabled
+        if vfi_config.get("enabled", False):
+            algo = vfi_config.get("algo", "rife") # Default to rife
+            if algo == "rife":
+                from lightx2v.models.vfi.rife.rife_comfyui_wrapper import RIFEWrapper
+                logger.info(f"Loading RIFE model from {vfi_config['model_path']}...")
+                return RIFEWrapper(vfi_config["model_path"])
+            else:
+                logger.warning(f"Unsupported VFI algo: {algo}")
+                return None
+        return None
+
     def run_pipeline(self, input_info):
         self.profiler.log_usage("Start Pipeline")
         logger.info("=" * 80)
@@ -1682,41 +1793,37 @@ class Wan22MoeCustomRunner(Wan22MoeDistillRunner):
             logger.info("=" * 80)
             
             video_tensor = result.get("video")
-            if video_tensor is None:
-                logger.warning("No video tensor found in result. Skipping interpolation.")
-            else:
-                interpolator = FrameInterpolator(
-                    model_path=frame_interp_config.get("model_path", "models/rife/RIFEv4.26_0921"),
-                    device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                )
+            if video_tensor is not None:
+                # Try to load VFI model if not loaded
+                if not hasattr(self, "vfi_model") or self.vfi_model is None:
+                     if hasattr(self, "load_vfi_model"):
+                         self.vfi_model = self.load_vfi_model()
                 
-                source_fps = frame_interp_config.get("source_fps", 8.0)
-                target_fps = frame_interp_config.get("target_fps", 24.0)
-                scale = frame_interp_config.get("scale", 1.0)
-                
-                logger.info(f"Interpolating: {source_fps} FPS → {target_fps} FPS (scale={scale})")
-                
-                interpolated_video = interpolator.interpolate(
-                    video_tensor=video_tensor,
-                    source_fps=source_fps,
-                    target_fps=target_fps,
-                    scale=scale
-                )
-                
-                interpolator.cleanup()
-                
-                logger.info("=" * 80)
-                logger.info("✓ Frame interpolation complete!")
-                logger.info("=" * 80)
-                
-                if not original_return_tensor and original_save_path:
-                    logger.info(f"🎬 Saving interpolated video to {original_save_path} 🎬")
-                    from lightx2v.utils.utils import save_to_video
-                    save_to_video(interpolated_video, original_save_path, fps=target_fps, method="ffmpeg")
-                    logger.info(f"✅ Interpolated video saved successfully to: {original_save_path} ✅")
-                    result = {"video": None}
-                else:
-                    result = {"video": interpolated_video}
+                if hasattr(self, "vfi_model") and self.vfi_model is not None:
+                    target_fps = frame_interp_config.get("target_fps", 32.0)
+                    source_fps = frame_interp_config.get("source_fps", 16.0)
+                    
+                    # RIFEWrapper expects images, source_fps, target_fps, scale (processing scale)
+                    # We use scale=1.0 for standard processing resolution
+                    video_tensor = self.vfi_model.interpolate_frames(
+                        video_tensor,
+                        source_fps=source_fps,
+                        target_fps=target_fps,
+                        scale=1.0
+                    )
+                    
+                    logger.info("=" * 80)
+                    logger.info("✓ Frame interpolation complete!")
+                    logger.info("=" * 80)
+                    
+                    if not original_return_tensor and original_save_path:
+                        logger.info(f"🎬 Saving interpolated video to {original_save_path} 🎬")
+                        from lightx2v.utils.utils import save_to_video
+                        save_to_video(video_tensor, original_save_path, fps=target_fps, method="ffmpeg")
+                        logger.info(f"✅ Interpolated video saved successfully to: {original_save_path} ✅")
+                        result = {"video": None}
+                    else:
+                        result = {"video": video_tensor}
         
         if should_interpolate and not original_return_tensor:
             input_info.return_result_tensor = original_return_tensor
