@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vram_limit",
         type=float,
-        default=64068,
+        default=80068,
         help="VRAM limit in MB",
     )
     return parser

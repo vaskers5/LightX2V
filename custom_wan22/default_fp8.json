@@ -34,8 +34,6 @@
         2,
         2
     ],
-    "use_ret_steps": false,
-    "use_bfloat16": true,
     "use_prompt_enhancer": false,
     "parallel": false,
     "seq_parallel": false,
@@ -43,8 +41,8 @@
     "use_image_encoder": false,
     "attnmap_frame_num": 81,
     "target_video_length": 81,
-    "target_height": 480,
-    "target_width": 832,
+    "target_height": 832,
+    "target_width": 480,
     "self_attn_1_type": "sage_attn2",
     "cross_attn_1_type": "sage_attn2",
     "cross_attn_2_type": "sage_attn2",
@@ -65,7 +63,7 @@
     "dit_quant_scheme": "fp8-sgl",
     "t5_quantized": false,
     "motion_enhancement": {
-        "enabled": true,
+        "enabled": false,
         "amplitude": 1.2
     },
     "frame_interpolation": {
@@ -76,7 +74,7 @@
         "scale": 2.0
     },
     "torch_compile": {
-    "enabled": true,
+    "enabled": false,
     "mode": "reduce-overhead",
     "fullgraph": false, 
     "dynamic": true,
@@ -84,7 +82,7 @@
     },
     
     "nag": {
-        "enabled": true,
+        "enabled": false,
         "scale": 2.5,
         "tau": 2.5,
         "alpha": 0.25,
@@ -93,12 +91,12 @@
     "lora_configs": [
         {
             "name": "high_noise_model",
-            "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise_fp8.safetensors",
+            "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise.safetensors",
             "strength": 1.0
         },
         {
             "name": "low_noise_model",
-            "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise_fp8.safetensors",
+            "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise.safetensors",
             "strength": 1.0
         }
     ],

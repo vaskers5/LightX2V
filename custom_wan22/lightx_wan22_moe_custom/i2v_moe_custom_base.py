@@ -845,10 +845,20 @@ class VideoPackager:
 
 
 class WanLoraCustomWrapper:
+    _GLOBAL_LORA_CACHE = {}
+
     def __init__(self, wan_model):
         self.model = wan_model
         self.lora_metadata = {}
         self.override_dict = {}  # On CPU
+        self.lora_cache = {}
+        self._lora_group_cache = {}
+        self._model_canonical_map = None
+        self._cached_weight_keys = None
+        self._prefer_gpu_apply = (
+            os.environ.get("LIGHTX2V_LORA_DEVICE", "").lower() in {"gpu", "cuda", "cuda:0", "cuda:1", "auto"}
+            and torch.cuda.is_available()
+        )
 
     def load_lora(self, lora_path, lora_name=None):
         if lora_name is None:
@@ -866,6 +876,46 @@ class WanLoraCustomWrapper:
     def _load_lora_file(self, file_path):
         return load_lora_safetensors(file_path, target_dtype=GET_DTYPE())
 
+    @staticmethod
+    def _normalize_key(key):
+        import re
+
+        if key.startswith("diffusion_model."):
+            key = key[len("diffusion_model."):]
+        elif key.startswith("lora_unet_"):
+            key = key.replace("lora_unet_", "blocks.")
+
+        key = re.sub(r"\.(?:lora_(?:down|up|A|B)|alpha)(?:\.weight)?$", "", key)
+
+        if key.endswith(".weight"):
+            key = key[:-7]
+
+        return key
+
+    def _get_lora_weights(self, lora_name):
+        meta = self.lora_metadata[lora_name]
+        cache_key = (Path(meta["path"]).resolve(), GET_DTYPE())
+
+        if cache_key in self.lora_cache:
+            return self.lora_cache[cache_key]
+        if cache_key in WanLoraCustomWrapper._GLOBAL_LORA_CACHE:
+            weights = WanLoraCustomWrapper._GLOBAL_LORA_CACHE[cache_key]
+            self.lora_cache[cache_key] = weights
+            return weights
+
+        weights = self._load_lora_file(meta["path"])
+        self.lora_cache[cache_key] = weights
+        WanLoraCustomWrapper._GLOBAL_LORA_CACHE[cache_key] = weights
+        return weights
+
+    def _get_model_canonical_map(self, weight_dict):
+        # Cache normalized key mapping; keys stay constant after model init
+        current_keys = tuple(weight_dict.keys())
+        if self._model_canonical_map is None or self._cached_weight_keys != current_keys:
+            self._model_canonical_map = {self._normalize_key(k): k for k in current_keys}
+            self._cached_weight_keys = current_keys
+        return self._model_canonical_map
+
     def apply_lora(self, lora_name, alpha=1.0):
         if lora_name not in self.lora_metadata:
             logger.info(f"LoRA {lora_name} not found. Please load it first.")
@@ -874,7 +924,7 @@ class WanLoraCustomWrapper:
             logger.error("Model does not have 'original_weight_dict'. Cannot apply LoRA.")
             return False
 
-        lora_weights = self._load_lora_file(self.lora_metadata[lora_name]["path"])
+        lora_weights = self._get_lora_weights(lora_name)
         weight_dict = self.model.original_weight_dict
         self._apply_lora_weights(weight_dict, lora_weights, alpha)
         self.model._apply_weights(weight_dict)
@@ -885,38 +935,25 @@ class WanLoraCustomWrapper:
 
     @torch.no_grad()
     def _apply_lora_weights(self, weight_dict, lora_weights, alpha):
-        import re
-        
-        def normalize_key(key):
-            if key.startswith("diffusion_model."):
-                key = key[len("diffusion_model."):]
-            elif key.startswith("lora_unet_"):
-                key = key.replace("lora_unet_", "blocks.")
-            
-            key = re.sub(r"\.(?:lora_(?:down|up|A|B)|alpha)(?:\.weight)?$", "", key)
-            
-            if key.endswith(".weight"):
-                key = key[:-7]
+        model_canonical_map = self._get_model_canonical_map(weight_dict)
+
+        group_cache_key = id(lora_weights)
+        if group_cache_key in self._lora_group_cache:
+            lora_groups = self._lora_group_cache[group_cache_key]
+        else:
+            lora_groups = {}
+            for key, tensor in lora_weights.items():
+                canon = self._normalize_key(key)
+                if canon not in lora_groups:
+                    lora_groups[canon] = {}
                 
-            return key
-
-        model_canonical_map = {}
-        for k in weight_dict.keys():
-            canon = normalize_key(k)
-            model_canonical_map[canon] = k
-
-        lora_groups = {}
-        for key, tensor in lora_weights.items():
-            canon = normalize_key(key)
-            if canon not in lora_groups:
-                lora_groups[canon] = {}
-            
-            if "lora_down" in key or "lora_A" in key:
-                lora_groups[canon]["down"] = tensor
-            elif "lora_up" in key or "lora_B" in key:
-                lora_groups[canon]["up"] = tensor
-            elif "alpha" in key:
-                lora_groups[canon]["alpha"] = tensor
+                if "lora_down" in key or "lora_A" in key:
+                    lora_groups[canon]["down"] = tensor
+                elif "lora_up" in key or "lora_B" in key:
+                    lora_groups[canon]["up"] = tensor
+                elif "alpha" in key:
+                    lora_groups[canon]["alpha"] = tensor
+            self._lora_group_cache[group_cache_key] = lora_groups
 
         applied_count = 0
         
@@ -943,8 +980,13 @@ class WanLoraCustomWrapper:
                     if scale_key in weight_dict:
                         try:
                             scale_tensor = weight_dict[scale_key]
-                            scale_cpu = scale_tensor.detach().to("cpu", dtype=torch.float32)
-                            scale_view = reshape_scale_for_param(scale_cpu, param.shape)
+                            if self._prefer_gpu_apply:
+                                scale_view = reshape_scale_for_param(
+                                    scale_tensor.detach().to(original_device, dtype=torch.float32), param.shape
+                                )
+                            else:
+                                scale_cpu = scale_tensor.detach().to("cpu", dtype=torch.float32)
+                                scale_view = reshape_scale_for_param(scale_cpu, param.shape)
                             quantized_mode = True
                         except Exception as err:
                             logger.warning(
@@ -954,16 +996,19 @@ class WanLoraCustomWrapper:
 
                 target_dtype = torch.float32 if quantized_mode else (torch.bfloat16 if is_fp8 else param.dtype)
                 offloaded_to_cpu = False
-                try:
-                    param_buffer = param.data.detach().to("cpu", dtype=target_dtype, non_blocking=True)
-                    offloaded_to_cpu = True
-                except RuntimeError as cpu_err:
-                    logger.warning(
-                        f"Failed to offload '{target_key}' to CPU ({cpu_err}). Applying LoRA on {original_device} instead."
-                    )
-                    param_buffer = param.data.detach().clone().to(target_dtype)
+                if self._prefer_gpu_apply:
+                    param_buffer = param.data.detach().to(target_dtype)
+                else:
+                    try:
+                        param_buffer = param.data.detach().to("cpu", dtype=target_dtype, non_blocking=True)
+                        offloaded_to_cpu = True
+                    except RuntimeError as cpu_err:
+                        logger.warning(
+                            f"Failed to offload '{target_key}' to CPU ({cpu_err}). Applying LoRA on {original_device} instead."
+                        )
+                        param_buffer = param.data.detach().clone().to(target_dtype)
 
-                target_device = param_buffer.device
+                target_device = param_buffer.device if not self._prefer_gpu_apply else original_device
                 if quantized_mode and scale_view is not None:
                     if scale_view.device != target_device:
                         scale_view = scale_view.to(target_device)
@@ -982,7 +1027,16 @@ class WanLoraCustomWrapper:
                     current_alpha *= (lora_alpha_val / rank)
                 
                 if param.shape == (up.shape[0], down.shape[1]):
+                    # Debugging: Check norms
+                    pre_norm = param_data.norm().item()
                     param_data.addmm_(up, down, alpha=current_alpha)
+                    post_norm = param_data.norm().item()
+                    
+                    if applied_count < 5: # Log first few updates
+                        logger.info(f"Applying LoRA to {target_key}: Pre-norm={pre_norm:.4f}, Post-norm={post_norm:.4f}, Alpha={current_alpha}")
+                        if quantized_mode:
+                             logger.info(f"  Scale before: {scale_view.mean().item():.6f}")
+                    
                     applied_count += 1
                 elif param.dim() == 4 and down.dim() == 4 and up.dim() == 4:
                     if down.shape[-2:] == (1, 1) and up.shape[-2:] == (1, 1):
@@ -1007,6 +1061,27 @@ class WanLoraCustomWrapper:
                 if quantized_mode and scale_view is not None:
                     if scale_view.device != param_data.device:
                         scale_view = scale_view.to(param_data.device)
+                    
+                    # Recalculate scale to avoid clipping if the weights grew
+                    # We need to update the original scale tensor in weight_dict so subsequent LoRAs see the correct scale
+                    if scale_tensor is not None:
+                        # Calculate new max per channel (or per tensor depending on scale shape)
+                        if scale_view.numel() == 1:
+                            new_max = param_data.abs().max()
+                            new_scale = torch.clamp(new_max / FP8_MAX_VALUE, min=1e-6)
+                            scale_tensor.copy_(new_scale.view(scale_tensor.shape))
+                            scale_view = reshape_scale_for_param(scale_tensor.to(param_data.device, dtype=torch.float32), param.shape)
+                        elif scale_view.numel() == param_data.shape[0]:
+                            # Per-channel scaling (dim 0)
+                            new_max = param_data.abs().amax(dim=tuple(range(1, param_data.ndim)), keepdim=True)
+                            new_scale = torch.clamp(new_max / FP8_MAX_VALUE, min=1e-6)
+                            # Update the source scale tensor
+                            scale_tensor.copy_(new_scale.view(scale_tensor.shape))
+                            scale_view = reshape_scale_for_param(scale_tensor.to(param_data.device, dtype=torch.float32), param.shape)
+                        
+                        if applied_count < 5:
+                             logger.info(f"  Scale after: {scale_view.mean().item():.6f}")
+
                     quantized = torch.clamp(param_data / scale_view, min=-FP8_MAX_VALUE, max=FP8_MAX_VALUE)
                     updated_tensor = quantized.to(torch.float8_e4m3fn)
                 else:
