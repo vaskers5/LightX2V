@@ -2,6 +2,7 @@ import re
 from abc import ABCMeta, abstractmethod
 
 import torch
+from loguru import logger
 
 from lightx2v.utils.envs import *
 from lightx2v.utils.global_paras import CALIB
@@ -86,6 +87,14 @@ class MMWeightTemplate(metaclass=ABCMeta):
 
     def set_config(self, config={}):
         self.config = config
+
+    def add_lora(self, down, up, alpha):
+        if not hasattr(self, "lora_list"):
+            self.lora_list = []
+        self.lora_list.append({"down": down, "up": up, "alpha": alpha})
+
+    def clear_loras(self):
+        self.lora_list = []
 
     def to_cuda(self, non_blocking=False):
         self.weight = self.pin_weight.cuda(non_blocking=non_blocking)
@@ -899,6 +908,28 @@ class MMWeightWfp8channelAfp8channeldynamicSgl(MMWeightQuantTemplate):
             self.infer_dtype,
             bias=self.bias,
         )
+
+        if hasattr(self, "lora_list") and self.lora_list:
+            dtype = input_tensor.dtype
+            for lora in self.lora_list:
+                down = lora["down"]
+                up = lora["up"]
+                alpha = lora["alpha"]
+                
+                # Ensure lora weights are on the same device and dtype as input
+                if down.device != input_tensor.device:
+                    down = down.to(input_tensor.device)
+                    up = up.to(input_tensor.device)
+                
+                if down.dtype != dtype:
+                    down = down.to(dtype)
+                    up = up.to(dtype)
+                
+                # Compute LoRA branch: x @ down.T @ up.T * alpha
+                lora_out = torch.nn.functional.linear(input_tensor, down)
+                lora_out = torch.nn.functional.linear(lora_out, up)
+                output_tensor += lora_out * alpha
+
         return output_tensor
 
 

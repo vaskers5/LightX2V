@@ -82,8 +82,9 @@ class RIFEWrapper:
 
                 # Convert ComfyUI format [H, W, C] to RIFE format [1, C, H, W]
                 # Also convert from [0, 1] to [0, 1] (already in correct range)
-                I0 = frame1.permute(2, 0, 1).unsqueeze(0).to(self.device)
-                I1 = frame2.permute(2, 0, 1).unsqueeze(0).to(self.device)
+                # Ensure float32 for RIFE model compatibility
+                I0 = frame1.permute(2, 0, 1).unsqueeze(0).to(self.device, dtype=torch.float32)
+                I1 = frame2.permute(2, 0, 1).unsqueeze(0).to(self.device, dtype=torch.float32)
 
                 # Pad images
                 I0 = F.pad(I0, padding)

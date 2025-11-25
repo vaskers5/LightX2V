@@ -16,6 +16,7 @@ def compiled_method(compile_options: Optional[Dict] = None):
             "compile_mode": False,
             "selected_graph": None,
             "selected_compiled": None,
+            "compile_options": dict(compile_opts),
         }
 
         @functools.wraps(func)
@@ -27,7 +28,7 @@ def compiled_method(compile_options: Optional[Dict] = None):
                 if graph_name not in state["compiled_graphs"]:
                     logger.info(f"[Compile] Compiling {func_name} as '{graph_name}'...")
 
-                    compiled_func = torch.compile(state["original_func"], **compile_opts)
+                    compiled_func = torch.compile(state["original_func"], **state["compile_options"])
 
                     try:
                         result = compiled_func(self, *args, **kwargs)
@@ -96,6 +97,12 @@ def compiled_method(compile_options: Optional[Dict] = None):
             else:
                 logger.info(f"[Compile] Graph '{graph_name}' not found")
 
+        def _set_compile_options(options: Optional[Dict]):
+            state["compile_options"] = dict(options or {})
+            logger.info(
+                f"[Compile] Updated compile options for {func_name}: {state['compile_options']}"
+            )
+
         wrapper._enable_compile_mode = _enable_compile_mode
         wrapper._disable_compile_mode = _disable_compile_mode
         wrapper._select_graph = _select_graph
@@ -103,6 +110,7 @@ def compiled_method(compile_options: Optional[Dict] = None):
         wrapper._get_status = _get_status
         wrapper._clear_graphs = _clear_graphs
         wrapper._remove_graph = _remove_graph
+        wrapper._set_compile_options = _set_compile_options
         wrapper._func_name = func_name
 
         return wrapper

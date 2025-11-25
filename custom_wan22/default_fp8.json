@@ -98,6 +98,26 @@
             "name": "low_noise_model",
             "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise.safetensors",
             "strength": 1.0
+        },
+        {
+            "name": "high_noise_model",
+            "path": "models/wan2.2_models/loras/bbc_blowjob/wan22-bbcdeepthroat-115epoc-high-k3nk.safetensors",
+            "strength": 1.0
+        },
+        {
+            "name": "low_noise_model",
+            "path": "models/wan2.2_models/loras/bbc_blowjob/wan22-bbcdeepthroat-155epoc-low-720-k3nk.safetensors",
+            "strength": 1.0
+        },
+        {
+            "name": "high_noise_model",
+            "path": "models/wan2.2_models/loras/ultimate_blow_job/wan22-ultimatedeepthroat-i2v-102epoc-high-k3nk.safetensors",
+            "strength": 1.0
+        },
+        {
+            "name": "low_noise_model",
+            "path": "models/wan2.2_models/loras/ultimate_blow_job/wan22-ultimatedeepthroat-I2V-101epoc-low-k3nk.safetensors",
+            "strength": 1.0
         }
     ],
     "input_info": {
