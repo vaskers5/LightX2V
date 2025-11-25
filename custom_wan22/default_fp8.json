@@ -4,11 +4,11 @@
     "task": "i2v",
     "scheduler_type": "EulerScheduler",
     "sf_model_path": null,
-    "high_noise_quantized_ckpt": "models/wan2.2_models/distill_models/wan2.2_i2v_A14b_high_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
-    "low_noise_quantized_ckpt": "models/wan2.2_models/distill_models/wan2.2_i2v_A14b_low_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
-    "vae_path": "models/wan2.2_models/vae/Wan2.1_VAE.pth",
-    "t5_original_ckpt": "models/wan2.2_models/encoders/models_t5_umt5-xxl-enc-bf16_fully_uncensored.safetensors",
-    "clip_original_ckpt": "models/wan2.2_models/encoders/models_clip_open-clip-xlm-roberta-large-vit-huge-14.safetensors",
+    "high_noise_quantized_ckpt": "models/prod_models/distill_models/wan2.2_i2v_A14b_high_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
+    "low_noise_quantized_ckpt": "models/prod_models/distill_models/wan2.2_i2v_A14b_low_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
+    "vae_path": "models/prod_models/vae/Wan2.1_VAE.pth",
+    "t5_original_ckpt": "models/prod_models/text_encoders/models_t5_umt5-xxl-enc-bf16_fully_uncensored.safetensors",
+    "clip_original_ckpt": "models/prod_models/encoders/models_clip_open-clip-xlm-roberta-large-vit-huge-14.safetensors",
     "_class_name": "WanModel",
     "_diffusers_version": "0.33.0",
     "dim": 5120,
@@ -63,26 +63,19 @@
     "dit_quant_scheme": "fp8-sgl",
     "t5_quantized": false,
     "motion_enhancement": {
-        "enabled": false,
+        "enabled": true,
         "amplitude": 1.2
     },
     "frame_interpolation": {
         "enabled": true,
-        "model_path": "models/rife/RIFEv4.26_0921/flownet.pkl",
+        "model_path": "models/prod_models/rife/RIFEv4.26_0921/flownet.pkl",
         "source_fps": 16.0,
         "target_fps": 32.0,
         "scale": 2.0
     },
-    "torch_compile": {
-    "enabled": false,
-    "mode": "reduce-overhead",
-    "fullgraph": false, 
-    "dynamic": true,
-    "backend": "inductor"
-    },
     
     "nag": {
-        "enabled": false,
+        "enabled": true,
         "scale": 2.5,
         "tau": 2.5,
         "alpha": 0.25,
@@ -91,32 +84,32 @@
     "lora_configs": [
         {
             "name": "high_noise_model",
-            "path": "models/wan2.2_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise.safetensors",
+            "path": "models/prod_models/loras/nsfw_lora/high_nsfw_v13_000005000_high_noise.safetensors",
             "strength": 1.0
         },
         {
             "name": "low_noise_model",
-            "path": "models/wan2.2_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise.safetensors",
+            "path": "models/prod_models/loras/nsfw_lora/low_nsfw_v13_000005000_low_noise.safetensors",
             "strength": 1.0
         },
         {
             "name": "high_noise_model",
-            "path": "models/wan2.2_models/loras/bbc_blowjob/wan22-bbcdeepthroat-115epoc-high-k3nk.safetensors",
+            "path": "models/prod_models/loras/bbc_blowjob/wan22-bbcdeepthroat-115epoc-high-k3nk.safetensors",
             "strength": 1.0
         },
         {
             "name": "low_noise_model",
-            "path": "models/wan2.2_models/loras/bbc_blowjob/wan22-bbcdeepthroat-155epoc-low-720-k3nk.safetensors",
+            "path": "models/prod_models/loras/bbc_blowjob/wan22-bbcdeepthroat-155epoc-low-720-k3nk.safetensors",
             "strength": 1.0
         },
         {
             "name": "high_noise_model",
-            "path": "models/wan2.2_models/loras/ultimate_blow_job/wan22-ultimatedeepthroat-i2v-102epoc-high-k3nk.safetensors",
+            "path": "models/prod_models/loras/ultimate_blow_job/wan22-ultimatedeepthroat-i2v-102epoc-high-k3nk.safetensors",
             "strength": 1.0
         },
         {
             "name": "low_noise_model",
-            "path": "models/wan2.2_models/loras/ultimate_blow_job/wan22-ultimatedeepthroat-I2V-101epoc-low-k3nk.safetensors",
+            "path": "models/prod_models/loras/ultimate_blow_job/wan22-ultimatedeepthroat-I2V-101epoc-low-k3nk.safetensors",
             "strength": 1.0
         }
     ],
